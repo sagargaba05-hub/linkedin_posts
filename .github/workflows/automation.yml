@@ -1,0 +1,55 @@
+name: linkedin-automation
+
+on:
+  # Runs every 15 minutes (UTC). The script internally decides whether
+  # it's time to draft (10 AM in TZ) and always polls Slack threads.
+  schedule:
+    - cron: "*/15 * * * *"
+
+  # Manual trigger for ad-hoc runs / testing — visible as a "Run workflow"
+  # button in the Actions tab on GitHub.
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Skip actual LinkedIn POST (everything else still runs)"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
+# Prevent overlapping runs — if a previous run is still going, queue this one.
+concurrency:
+  group: linkedin-automation
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run automation
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          SHEET_ID: ${{ secrets.SHEET_ID }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+          LINKEDIN_TOKEN: ${{ secrets.LINKEDIN_TOKEN }}
+          TZ: "Asia/Kolkata"
+          DAILY_DRAFT_HOUR: "10"
+          DRY_RUN: ${{ github.event.inputs.dry_run == 'true' && '1' || '0' }}
+        run: python linkedin_automation.py
