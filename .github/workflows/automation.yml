@@ -24,6 +24,11 @@ concurrency:
   group: linkedin-automation
   cancel-in-progress: false
 
+# Opt JavaScript actions into Node.js 24 ahead of GitHub's June 2026 forced cutover.
+# Silences the "Node.js 20 actions are deprecated" warning.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   run:
     runs-on: ubuntu-latest
