@@ -3,3 +3,4 @@ gspread>=6.1.0
 google-auth>=2.34.0
 requests>=2.32.0
 slack-sdk>=3.32.0
+python-dateutil>=2.9.0
