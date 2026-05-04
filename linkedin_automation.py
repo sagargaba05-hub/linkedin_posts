@@ -362,14 +362,34 @@ def slack_get_latest_user_reply(
     try:
         resp = client.conversations_replies(channel=channel_id, ts=thread_ts, limit=50)
     except SlackApiError as e:
-        LOG.warning("Slack thread fetch failed: %s", e.response.get("error"))
+        LOG.warning("Slack thread fetch failed for ts=%s: %s", thread_ts, e.response.get("error"))
         return None
     msgs = resp.get("messages", [])
-    # Skip the parent message; get latest non-bot reply
-    user_replies = [m for m in msgs[1:] if m.get("user") and m.get("user") != bot_user_id]
+    LOG.info("Thread %s has %d total messages", thread_ts, len(msgs))
+    # Diagnostic: log a compact summary of every message in the thread
+    for i, m in enumerate(msgs):
+        LOG.info(
+            "  msg[%d] user=%s bot_id=%s subtype=%s text_preview=%r",
+            i, m.get("user"), m.get("bot_id"), m.get("subtype"),
+            (m.get("text") or "")[:60],
+        )
+    # Reply candidates = anything other than the parent message that wasn't sent
+    # by our bot (filter both by user_id and bot_id to be safe)
+    user_replies = []
+    for m in msgs[1:]:
+        if m.get("user") == bot_user_id:
+            continue
+        if m.get("bot_id"):
+            continue
+        if not m.get("text"):
+            continue
+        user_replies.append(m)
+    LOG.info("Filtered to %d candidate user replies", len(user_replies))
     if not user_replies:
         return None
-    return user_replies[-1].get("text", "").strip()
+    latest_text = user_replies[-1].get("text", "").strip()
+    LOG.info("Latest user reply text: %r", latest_text)
+    return latest_text
 
 
 def slack_post_followup(
@@ -485,18 +505,26 @@ def process_pending_drafts(
 ):
     """For each draft in 'drafted' state, check Slack thread for user reply."""
     drafts: list[dict] = state.state_get("drafts", [])
+    LOG.info("State has %d total drafts", len(drafts))
+    for i, d in enumerate(drafts):
+        LOG.info("  drafts[%d] sno=%s status=%s thread_ts=%s",
+                 i, d.get("sno"), d.get("status"), d.get("thread_ts"))
     if not drafts:
         return
 
     changed = False
     for d in drafts:
         if d.get("status") != "drafted":
+            LOG.info("Skipping SNo. %s (status=%s)", d.get("sno"), d.get("status"))
             continue
         thread_ts = d["thread_ts"]
+        LOG.info("Checking SNo. %s (thread_ts=%s) for replies", d.get("sno"), thread_ts)
         reply = slack_get_latest_user_reply(slack, channel_id, thread_ts, bot_user_id)
         if not reply:
+            LOG.info("No actionable reply for SNo. %s", d.get("sno"))
             continue
         reply_lc = reply.lower().strip()
+        LOG.info("Processing reply for SNo. %s: %r", d.get("sno"), reply_lc[:80])
 
         if reply_lc.startswith("approve"):
             LOG.info("SNo. %s approved — posting to LinkedIn", d["sno"])
