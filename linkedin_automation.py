@@ -317,10 +317,15 @@ def linkedin_publish_post(token: str, member_id: str, text: str) -> str:
     )
     if r.status_code >= 400:
         raise RuntimeError(f"LinkedIn POST failed [{r.status_code}]: {r.text}")
+    # The UGC posts API returns the URN in the x-restli-id header. It looks like
+    # `urn:li:ugcPost:7193...` (or `urn:li:share:...` for legacy posts). LinkedIn's
+    # feed-update URLs accept either URN type as long as the FULL urn is in the path.
     urn = r.headers.get("x-restli-id") or r.json().get("id", "")
-    # urn looks like urn:li:share:7193... -> URL needs the share id
-    share_id = urn.rsplit(":", 1)[-1]
-    return f"https://www.linkedin.com/feed/update/urn:li:share:{share_id}/"
+    LOG.info("LinkedIn API response: status=%s urn=%s headers=%s",
+             r.status_code, urn, dict(r.headers))
+    if not urn:
+        raise RuntimeError(f"LinkedIn POST returned no URN. Body: {r.text}")
+    return f"https://www.linkedin.com/feed/update/{urn}/"
 
 
 # --------------------------------------------------------------------------- #
