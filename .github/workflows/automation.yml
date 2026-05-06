@@ -54,7 +54,7 @@ jobs:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
           LINKEDIN_TOKEN: ${{ secrets.LINKEDIN_TOKEN }}
-          TZ: "Asia/Kolkata"
+          TZ: "Australia/Sydney"
           DAILY_DRAFT_HOUR: "10"
           DRY_RUN: ${{ github.event.inputs.dry_run == 'true' && '1' || '0' }}
         run: python linkedin_automation.py

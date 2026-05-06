@@ -15,11 +15,19 @@ consistent across phases.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+
 from anthropic import Anthropic
 from slack_sdk import WebClient
 
 from config import DAILY_DRAFT_HOUR, get_logger, now_iso, now_local, today_str
-from generator import DraftRequest, generate_draft, pick_fallback_topic
+from generator import (
+    DraftRequest,
+    GenerationResult,
+    generate_draft,
+    generate_post,
+    pick_fallback_topic,
+)
 from linkedin_api import publish_post
 from sheets import SheetClient
 from slack_helpers import (
@@ -30,6 +38,10 @@ from slack_helpers import (
 )
 
 LOG = get_logger("pipeline")
+
+# Drafts that have been sitting in 'drafted' state with no user reply for this
+# many hours are auto-abandoned so they stop polluting future runs.
+ABANDONED_DRAFT_HOURS = 36
 
 
 # --------------------------------------------------------------------------- #
@@ -53,6 +65,30 @@ def ensure_member_id(state: SheetClient, token: str) -> str:
 # --------------------------------------------------------------------------- #
 
 
+def _gc_abandoned_drafts(drafts: list[dict]) -> bool:
+    """Mark drafts older than ABANDONED_DRAFT_HOURS that are still 'drafted'
+    (no user reply ever came) as 'abandoned' so we stop polling them.
+    Returns True if anything changed."""
+    cutoff = now_local() - timedelta(hours=ABANDONED_DRAFT_HOURS)
+    changed = False
+    for d in drafts:
+        if d.get("status") != "drafted":
+            continue
+        drafted_at_str = d.get("drafted_at", "")
+        if not drafted_at_str:
+            continue
+        try:
+            drafted_at = datetime.fromisoformat(drafted_at_str)
+        except ValueError:
+            continue
+        if drafted_at < cutoff:
+            LOG.info("Auto-abandoning stale draft sno=%s (drafted %s)",
+                     d.get("sno"), drafted_at_str)
+            d["status"] = "abandoned"
+            changed = True
+    return changed
+
+
 def process_pending_drafts(
     state: SheetClient,
     slack: WebClient,
@@ -71,7 +107,8 @@ def process_pending_drafts(
     if not drafts:
         return
 
-    changed = False
+    changed = _gc_abandoned_drafts(drafts)
+
     for d in drafts:
         if d.get("status") != "drafted":
             LOG.info("Skipping SNo. %s (status=%s)", d.get("sno"), d.get("status"))
@@ -199,35 +236,49 @@ def _handle_regenerate(
 # --------------------------------------------------------------------------- #
 
 
+def _effective_sno(row: dict) -> str:
+    """Each row needs a stable identifier for state tracking. If the user left
+    SNo. blank (very common when adding new rows), fall back to row number."""
+    if row.get("sno"):
+        return row["sno"]
+    return f"row-{row.get('row_number', 'unknown')}"
+
+
 def _select_next_pending(
     pending_rows: list[dict], in_flight_snos: set,
 ) -> dict | None:
-    """Pick the next row to draft. Preference order:
-       1) earliest Date among pending rows (if Date is filled and parseable)
-       2) lowest SNo. among pending rows
-       Skips any SNo already in the in-flight set so we don't re-pick."""
-    eligible = [r for r in pending_rows if r["sno"] and r["sno"] not in in_flight_snos]
+    """Pick the next pending row to draft. Rules:
+       - Skip rows whose Topic is empty (would produce useless drafts)
+       - Skip rows whose effective SNo is already in flight
+       - Prefer earliest parseable Date; fallback to row number
+       Sets each picked row's 'sno' to its effective SNo so callers can use it."""
+    eligible = []
+    for r in pending_rows:
+        if not r.get("topic", "").strip():
+            LOG.info("Skipping row=%s — empty Topic", r.get("row_number"))
+            continue
+        eff_sno = _effective_sno(r)
+        if eff_sno in in_flight_snos:
+            LOG.info("Skipping sno=%s — already in flight", eff_sno)
+            continue
+        # Annotate the row with its effective SNo for downstream use
+        r["sno"] = eff_sno
+        eligible.append(r)
+
     if not eligible:
         return None
 
-    # Try date-first ordering
     def date_key(r: dict) -> tuple:
         from datetime import date
         try:
             d = r["date"]
             if d:
-                # Accept YYYY-MM-DD or DD-MM-YYYY etc. — be lenient
                 from dateutil import parser as dateparser  # type: ignore
                 parsed = dateparser.parse(d, dayfirst=False).date()
-                return (0, parsed, r["sno"])
+                return (0, parsed, r.get("row_number", 0))
         except Exception:
             pass
-        # No date or unparseable — push to end, sort by SNo
-        try:
-            sno_int = int(r["sno"])
-        except ValueError:
-            sno_int = 10**9
-        return (1, date.max, sno_int)
+        return (1, date.max, r.get("row_number", 0))
 
     try:
         eligible.sort(key=date_key)
@@ -235,8 +286,8 @@ def _select_next_pending(
         LOG.warning("Pending-row sort failed (%s); falling back to sheet order", e)
 
     pick = eligible[0]
-    LOG.info("Selected SNo. %s (Date=%r) from %d eligible pending rows",
-             pick["sno"], pick["date"], len(eligible))
+    LOG.info("Selected sno=%s row=%s Date=%r from %d eligible pending rows",
+             pick["sno"], pick["row_number"], pick["date"], len(eligible))
     return pick
 
 
@@ -285,14 +336,21 @@ def _draft_from_row(
         link=pick["link"],
         cta=pick["cta"],
     )
-    draft_text = generate_draft(anthropic_client, req)
-    thread_ts = post_draft(slack, channel_id, pick["sno"], draft_text)
+    result = generate_post(anthropic_client, req)
+    thread_ts = post_draft(
+        slack, channel_id, pick["sno"], result.draft,
+        image_suggestion=result.image_suggestion,
+        critic_verdict=result.critic_verdict,
+        critic_notes=result.critic_notes,
+        revision_count=result.revision_count,
+    )
 
     drafts.append({
         "sno": pick["sno"],
         "row_number": pick["row_number"],
         "thread_ts": thread_ts,
-        "draft": draft_text,
+        "draft": result.draft,
+        "plan": result.plan,
         "topic": pick["topic"],
         "angle": pick["angle"],
         "key_points": pick["key_points"],
@@ -303,16 +361,18 @@ def _draft_from_row(
         "status": "drafted",
         "drafted_at": now.isoformat(),
         "is_auto": False,
+        "critic_verdict": result.critic_verdict,
+        "image_suggestion": result.image_suggestion,
     })
 
-    # Sheet writes for this draft
     updates = {"status": "drafted"}
-    if not pick["generated_by"]:
+    if not pick.get("generated_by"):
         updates["generated_by"] = "Sagar"
     state.update_row(pick["row_number"], updates)
     state.append_to_notes(
         pick["row_number"],
-        f"Draft generated and posted to Slack thread {thread_ts}",
+        f"Drafted (critic={result.critic_verdict}, revisions={result.revision_count}). "
+        f"Slack thread {thread_ts}",
     )
 
 
@@ -323,11 +383,11 @@ def _draft_from_fallback_theme(
     LOG.info("No pending rows — using topics.md fallback")
     used_recently = state.state_get("recent_fallback_themes", [])
     theme = pick_fallback_topic(used_recently)
-    used_recently = ([theme] + used_recently)[:10]  # remember last 10
+    used_recently = ([theme] + used_recently)[:10]
     state.state_set("recent_fallback_themes", used_recently)
 
     req = DraftRequest(topic=theme, voice="thoughtful")
-    draft_text = generate_draft(anthropic_client, req)
+    result = generate_post(anthropic_client, req)
 
     auto_sno = f"auto-{today_str()}"
     try:
@@ -338,13 +398,20 @@ def _draft_from_fallback_theme(
         LOG.exception("Could not append auto row to queue")
         row_number = 0
 
-    thread_ts = post_draft(slack, channel_id, auto_sno, draft_text)
+    thread_ts = post_draft(
+        slack, channel_id, auto_sno, result.draft,
+        image_suggestion=result.image_suggestion,
+        critic_verdict=result.critic_verdict,
+        critic_notes=result.critic_notes,
+        revision_count=result.revision_count,
+    )
 
     drafts.append({
         "sno": auto_sno,
         "row_number": row_number,
         "thread_ts": thread_ts,
-        "draft": draft_text,
+        "draft": result.draft,
+        "plan": result.plan,
         "topic": theme,
         "angle": "",
         "key_points": "",
@@ -355,10 +422,14 @@ def _draft_from_fallback_theme(
         "status": "drafted",
         "drafted_at": now.isoformat(),
         "is_auto": True,
+        "critic_verdict": result.critic_verdict,
+        "image_suggestion": result.image_suggestion,
     })
 
     if row_number:
         state.append_to_notes(
             row_number,
-            f"Auto-generated by Cowork (no pending rows). Posted to Slack thread {thread_ts}",
+            f"Auto-generated by Cowork (no pending rows). "
+            f"Critic={result.critic_verdict}, revisions={result.revision_count}. "
+            f"Slack thread {thread_ts}",
         )

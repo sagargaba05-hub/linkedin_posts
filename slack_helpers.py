@@ -14,21 +14,56 @@ from config import get_logger
 LOG = get_logger("slack")
 
 
-def post_draft(client: WebClient, channel_id: str, sno: str, draft: str) -> str:
-    """Post a new draft message. Returns the thread_ts (timestamp of the parent)."""
-    text = (
-        f":rocket: *Today's LinkedIn Draft (SNo. {sno})*\n\n"
-        f"{draft}\n\n"
-        f"---\n"
-        f"Reply *in this thread* with one of:\n"
-        f"• `approve`\n"
-        f"• `reject`\n"
-        f"• `regenerate: <your feedback>`\n"
-        f"\n"
-        f":bulb: To reply in-thread: hover the message → click the speech-bubble \"Reply in thread\" icon."
-    )
+def post_draft(
+    client: WebClient,
+    channel_id: str,
+    sno: str,
+    draft: str,
+    image_suggestion: str = "TEXT_ONLY",
+    critic_verdict: str = "PASS",
+    critic_notes: str = "",
+    revision_count: int = 0,
+) -> str:
+    """Post a new draft message. Returns the thread_ts (timestamp of the parent).
+
+    Enriches the message with the editor's image suggestion and the critic agent's
+    verdict so Sagar can see at a glance whether the model second-guessed itself."""
+    parts = [f":rocket: *Today's LinkedIn Draft (SNo. {sno})*", "", draft, "", "---"]
+
+    # Image suggestion line
+    if image_suggestion and image_suggestion.upper() != "TEXT_ONLY":
+        parts.append(f":frame_with_picture: *Suggested image:* {image_suggestion}")
+        parts.append("")
+    else:
+        parts.append(":memo: *Editor recommends posting text-only* (no image needed for this one)")
+        parts.append("")
+
+    # Critic verdict
+    if critic_verdict == "PASS":
+        verdict_line = ":white_check_mark: *Critic verdict:* PASS"
+    elif critic_verdict == "REVISE":
+        verdict_line = ":warning: *Critic verdict:* REVISE — auto-revised once"
+    else:
+        verdict_line = ":x: *Critic verdict:* FAIL — auto-revised once but issues may remain"
+    if revision_count > 0:
+        verdict_line += f" (revised {revision_count}×)"
+    parts.append(verdict_line)
+    if critic_notes and critic_verdict != "PASS":
+        parts.append(f"_{critic_notes}_")
+    parts.append("")
+
+    parts.extend([
+        "Reply *in this thread* with one of:",
+        "• `approve`",
+        "• `reject`",
+        "• `regenerate: <your feedback>`",
+        "",
+        ":bulb: To reply in-thread: hover the message → click the speech-bubble \"Reply in thread\" icon.",
+    ])
+    text = "\n".join(parts)
     resp = client.chat_postMessage(channel=channel_id, text=text)
-    LOG.info("Posted draft for sno=%s thread_ts=%s", sno, resp["ts"])
+    LOG.info("Posted draft for sno=%s thread_ts=%s critic=%s revisions=%d",
+             sno, resp["ts"], critic_verdict, revision_count)
     return resp["ts"]
 
 
