@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 from anthropic import Anthropic
 
-from config import ANTHROPIC_MODEL, PROMPTS_DIR, get_logger
+from config import ANTHROPIC_MODEL, CRITIC_MODEL, PROMPTS_DIR, get_logger
 
 LOG = get_logger("gen")
 
@@ -171,8 +171,21 @@ class GenerationResult:
     plan: str
     critic_verdict: str           # "PASS" | "REVISE" | "FAIL"
     critic_notes: str             # human-readable feedback if not PASS
-    image_suggestion: str         # what kind of image (if any) would pair well
     revision_count: int = 0       # how many times we auto-revised
+
+
+# --------------------------------------------------------------------------- #
+# Prompt-caching helper                                                        #
+# --------------------------------------------------------------------------- #
+
+
+def _cached_system(text: str) -> list[dict]:
+    """Wrap a system-prompt string into a content block with cache_control set.
+    Anthropic charges 90% less for cached tokens. The system prompt is identical
+    across every call so it benefits maximally from caching.
+    Note: minimum cacheable size is 1024 tokens for Sonnet/Opus, 2048 for Haiku.
+    Below the minimum, the API silently doesn't cache (no error)."""
+    return [{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}]
 
 
 # --------------------------------------------------------------------------- #
@@ -204,10 +217,6 @@ hide behind abstraction.
 CLOSE: One sentence describing how the post ends — the closing thought, not \
 just "wrap it up". Aim for a line readers might quote.
 
-IMAGE SUGGESTION: One sentence describing what kind of human-made image would \
-pair well with this post (a real photo, a screenshot, a hand-drawn diagram). \
-Or "TEXT_ONLY" if the post stands better without an image.
-
 Do NOT write the post itself. Only the plan."""
 
 
@@ -237,27 +246,29 @@ def _plan_post(client: Anthropic, req: DraftRequest, about_me: str) -> str:
     resp = client.messages.create(
         model=ANTHROPIC_MODEL,
         max_tokens=1024,
-        system=PLAN_SYSTEM,
+        system=_cached_system(PLAN_SYSTEM),
         messages=[{"role": "user", "content": user_prompt}],
     )
     plan = resp.content[0].text.strip()
+    _log_cache_metrics("plan", resp)
     LOG.info("Plan generated (%d chars)", len(plan))
     return plan
 
 
-def _extract_image_suggestion(plan: str) -> str:
-    """Pull the IMAGE SUGGESTION line out of the plan. Returns 'TEXT_ONLY' if absent."""
-    for line in plan.splitlines():
-        if "IMAGE SUGGESTION" in line.upper():
-            after = line.split(":", 1)[1].strip() if ":" in line else ""
-            if after:
-                return after
-    # Sometimes the model puts it on the next line
-    lines = plan.splitlines()
-    for i, line in enumerate(lines):
-        if "IMAGE SUGGESTION" in line.upper() and i + 1 < len(lines):
-            return lines[i + 1].strip()
-    return "TEXT_ONLY"
+def _log_cache_metrics(label: str, resp) -> None:
+    """Surface cache hit/miss in logs so you can see prompt caching working."""
+    try:
+        u = resp.usage
+        LOG.info(
+            "[cache] %s: input=%s, cache_create=%s, cache_read=%s, output=%s",
+            label,
+            getattr(u, "input_tokens", "?"),
+            getattr(u, "cache_creation_input_tokens", "?"),
+            getattr(u, "cache_read_input_tokens", "?"),
+            getattr(u, "output_tokens", "?"),
+        )
+    except Exception:
+        pass
 
 
 # --------------------------------------------------------------------------- #
@@ -300,10 +311,11 @@ def _write_post_from_plan(
     resp = client.messages.create(
         model=ANTHROPIC_MODEL,
         max_tokens=2048,
-        system=system,
+        system=_cached_system(system),
         messages=[{"role": "user", "content": user_prompt}],
     )
     text = resp.content[0].text.strip()
+    _log_cache_metrics("write", resp)
     LOG.info("Draft from plan: %d chars, ~%d words", len(text), len(text.split()))
     return text
 
@@ -315,28 +327,24 @@ def _write_post_from_plan(
 CRITIC_SYSTEM = """You are a strict editor evaluating a LinkedIn post draft. The aim of \
 the post is to attract readers and grow audience — generic-sounding posts fail.
 
-Score the draft on each axis (1-5, 5 is best). Then give a one-line VERDICT.
+Output ONLY these lines (no markdown, no extra commentary):
 
-Output format (no markdown, just labeled lines):
-
-HOOK_STRENGTH: <1-5> — <one-line justification>
-CLARITY_OF_CLAIM: <1-5> — <one-line justification>
-SPECIFIC_EVIDENCE: <1-5> — <one-line justification>
-DISTINCTIVENESS: <1-5> — <one-line justification (5 = sounds like a real specific person, 1 = generic LinkedIn voice)>
-LENGTH_FIT: <PASS|FAIL> — <if outside 400-600 words, explain>
-BANNED_PHRASES: <none | comma-separated list of any AI cliches/banned phrases found>
-PREDICTED_ENGAGEMENT: <LOW|MEDIUM|HIGH>
-
+HOOK: <1-5>
+CLARITY: <1-5>
+EVIDENCE: <1-5>
+DISTINCTIVENESS: <1-5>
+LENGTH_FIT: <PASS|FAIL>
+BANNED_PHRASES: <none | comma-separated list>
+ENGAGEMENT: <LOW|MEDIUM|HIGH>
 VERDICT: <PASS|REVISE|FAIL>
-- PASS: ready to post, no revision needed
-- REVISE: workable but has fixable issues — list 1-3 specific things to change
-- FAIL: fundamentally wrong (off-topic, misunderstood angle, AI-meta-commentary). Auto-revise.
+REVISION_NOTES: <if not PASS, 1-2 short sentences of concrete feedback. Empty otherwise.>
 
-REVISION_NOTES: <if VERDICT is REVISE or FAIL, write 2-4 sentences of specific feedback >
-the writer should address. Be concrete: "tighten the third paragraph by cutting X" not >
-"make it punchier".>
+Verdict rules:
+- PASS = ready to publish (be selective; default to REVISE if anything feels off)
+- REVISE = workable but fixable issues (the auto-revision will use REVISION_NOTES)
+- FAIL = fundamentally wrong (off-topic, misunderstood angle, meta-commentary about prompts)
 
-Be strict. The default verdict for an average LinkedIn post should be REVISE, not PASS."""
+Be strict and brief."""
 
 
 def _critique_post(client: Anthropic, draft: str, req: DraftRequest) -> dict:
@@ -346,14 +354,15 @@ def _critique_post(client: Anthropic, draft: str, req: DraftRequest) -> dict:
         f"Voice: {req.voice or '(not specified)'}\n\n"
         f"DRAFT TO EVALUATE:\n---\n{draft}\n---"
     )
-    LOG.info("Running critic")
+    LOG.info("Running critic (model=%s)", CRITIC_MODEL)
     resp = client.messages.create(
-        model=ANTHROPIC_MODEL,
-        max_tokens=1024,
-        system=CRITIC_SYSTEM,
+        model=CRITIC_MODEL,
+        max_tokens=512,
+        system=_cached_system(CRITIC_SYSTEM),
         messages=[{"role": "user", "content": user_prompt}],
     )
     text = resp.content[0].text.strip()
+    _log_cache_metrics("critique", resp)
     LOG.info("Critic output (%d chars):\n%s", len(text), text[:600])
 
     # Parse verdict + notes
@@ -392,7 +401,6 @@ def generate_post(client: Anthropic, req: DraftRequest) -> GenerationResult:
     about_me = load_about_me()
 
     plan = _plan_post(client, req, about_me)
-    image_suggestion = _extract_image_suggestion(plan)
 
     draft = _write_post_from_plan(client, req, plan)
     crit = _critique_post(client, draft, req)
@@ -421,7 +429,6 @@ def generate_post(client: Anthropic, req: DraftRequest) -> GenerationResult:
         plan=plan,
         critic_verdict=crit["verdict"],
         critic_notes=crit["notes"],
-        image_suggestion=image_suggestion,
         revision_count=revisions,
     )
 

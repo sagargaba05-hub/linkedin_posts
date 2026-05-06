@@ -19,26 +19,14 @@ def post_draft(
     channel_id: str,
     sno: str,
     draft: str,
-    image_suggestion: str = "TEXT_ONLY",
     critic_verdict: str = "PASS",
     critic_notes: str = "",
     revision_count: int = 0,
 ) -> str:
     """Post a new draft message. Returns the thread_ts (timestamp of the parent).
-
-    Enriches the message with the editor's image suggestion and the critic agent's
-    verdict so Sagar can see at a glance whether the model second-guessed itself."""
+    Posts are text-only — no image suggestion (kept the approve→post path frictionless)."""
     parts = [f":rocket: *Today's LinkedIn Draft (SNo. {sno})*", "", draft, "", "---"]
 
-    # Image suggestion line
-    if image_suggestion and image_suggestion.upper() != "TEXT_ONLY":
-        parts.append(f":frame_with_picture: *Suggested image:* {image_suggestion}")
-        parts.append("")
-    else:
-        parts.append(":memo: *Editor recommends posting text-only* (no image needed for this one)")
-        parts.append("")
-
-    # Critic verdict
     if critic_verdict == "PASS":
         verdict_line = ":white_check_mark: *Critic verdict:* PASS"
     elif critic_verdict == "REVISE":

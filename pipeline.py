@@ -339,7 +339,6 @@ def _draft_from_row(
     result = generate_post(anthropic_client, req)
     thread_ts = post_draft(
         slack, channel_id, pick["sno"], result.draft,
-        image_suggestion=result.image_suggestion,
         critic_verdict=result.critic_verdict,
         critic_notes=result.critic_notes,
         revision_count=result.revision_count,
@@ -362,7 +361,6 @@ def _draft_from_row(
         "drafted_at": now.isoformat(),
         "is_auto": False,
         "critic_verdict": result.critic_verdict,
-        "image_suggestion": result.image_suggestion,
     })
 
     updates = {"status": "drafted"}
@@ -400,7 +398,6 @@ def _draft_from_fallback_theme(
 
     thread_ts = post_draft(
         slack, channel_id, auto_sno, result.draft,
-        image_suggestion=result.image_suggestion,
         critic_verdict=result.critic_verdict,
         critic_notes=result.critic_notes,
         revision_count=result.revision_count,
@@ -423,7 +420,6 @@ def _draft_from_fallback_theme(
         "drafted_at": now.isoformat(),
         "is_auto": True,
         "critic_verdict": result.critic_verdict,
-        "image_suggestion": result.image_suggestion,
     })
 
     if row_number:

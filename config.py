@@ -67,7 +67,10 @@ def env_required_all() -> dict[str, str]:
 # Constants                                                                   #
 # --------------------------------------------------------------------------- #
 
+# Writer + planner use Sonnet (creative work). Critic uses Haiku (structured
+# evaluation, ~5x cheaper, no measurable quality loss for the verdict step).
 ANTHROPIC_MODEL = env("ANTHROPIC_MODEL", "claude-sonnet-4-6")
+CRITIC_MODEL = env("CRITIC_MODEL", "claude-haiku-4-5-20251001")
 TZ_NAME = env("TZ", "Asia/Kolkata")
 DAILY_DRAFT_HOUR = int(env("DAILY_DRAFT_HOUR", "10"))
 DRY_RUN = env("DRY_RUN", "0") == "1"
