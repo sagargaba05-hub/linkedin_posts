@@ -1,6 +1,8 @@
 """
-sheets.py — Google Sheets adapter (read queue, write status fields, manage
-the hidden _state tab as a key/value store).
+sheets.py — Google Sheets adapter.
+
+Reads the queue tab + manages the hidden _state tab as a key/value store.
+All API calls are wrapped with retries and a circuit breaker.
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ from config import (
     now_iso,
     today_str,
 )
+from reliability import sheets_breaker, with_circuit, with_http_retries
 
 LOG = get_logger("sheets")
 
@@ -33,7 +36,6 @@ def _normalize_header(s: str) -> str:
 
 
 def _map_columns(headers: list[str]) -> dict[str, int]:
-    """Return {canonical_key: 0-based column index} for headers we recognize."""
     norm = [_normalize_header(h) for h in headers]
     out: dict[str, int] = {}
     for canonical, aliases in CANONICAL_COLUMNS.items():
@@ -55,6 +57,8 @@ class SheetClient:
     headers: list[str]
 
     @classmethod
+    @with_circuit(sheets_breaker)
+    @with_http_retries
     def connect(cls, sheet_id: str, sa_json: str) -> "SheetClient":
         creds_info = json.loads(sa_json)
         creds = Credentials.from_service_account_info(creds_info, scopes=SHEETS_SCOPES)
@@ -70,14 +74,11 @@ class SheetClient:
         headers = queue_ws.row_values(1)
         col_idx = _map_columns(headers)
         LOG.info("Mapped queue columns: %s", col_idx)
-        unmapped = [h for h in headers if _normalize_header(h) not in
-                    {alias for aliases in CANONICAL_COLUMNS.values() for alias in aliases}]
-        if unmapped:
-            LOG.info("Unmapped headers (will be left untouched): %s", unmapped)
         return cls(sheet_id, gc, sh, queue_ws, state_ws, col_idx, headers)
 
     # ------------------------------------------------------------------ queue tab
 
+    @with_http_retries
     def fetch_pending_rows(self) -> list[dict[str, Any]]:
         """All rows whose Status is empty or 'pending' (case-insensitive)."""
         all_rows = self.queue_ws.get_all_values()
@@ -90,24 +91,49 @@ class SheetClient:
             raw = raw + [""] * (max_idx + 1 - len(raw))
             status = (raw[status_col].strip().lower() if status_col is not None else "")
             if status in ("", "pending"):
-                out.append({
-                    "row_number": row_number,
-                    "raw": raw,
-                    "sno": self._cell(raw, "sno"),
-                    "date": self._cell(raw, "date"),
-                    "topic": self._cell(raw, "topic"),
-                    "angle": self._cell(raw, "angle"),
-                    "key_points": self._cell(raw, "key_points"),
-                    "voice": self._cell(raw, "voice"),
-                    "hook_style": self._cell(raw, "hook_style"),
-                    "link": self._cell(raw, "link"),
-                    "cta": self._cell(raw, "cta"),
-                    "status": self._cell(raw, "status"),
-                    "notes": self._cell(raw, "notes"),
-                    "generated_by": self._cell(raw, "generated_by"),
-                })
+                out.append(self._row_to_dict(row_number, raw))
         LOG.info("Found %d pending rows", len(out))
         return out
+
+    @with_http_retries
+    def fetch_posted_rows(self) -> list[dict[str, Any]]:
+        """All rows whose Status is 'posted' AND have a post URL.
+        Used by the engagement sync to refresh reach scores."""
+        all_rows = self.queue_ws.get_all_values()
+        if len(all_rows) < 2:
+            return []
+        out: list[dict[str, Any]] = []
+        status_col = self.col_idx.get("status")
+        post_url_col = self.col_idx.get("post_url")
+        max_idx = max(self.col_idx.values(), default=0)
+        for row_number, raw in enumerate(all_rows[1:], start=2):
+            raw = raw + [""] * (max_idx + 1 - len(raw))
+            status = (raw[status_col].strip().lower() if status_col is not None else "")
+            post_url = (raw[post_url_col].strip() if post_url_col is not None else "")
+            if status == "posted" and post_url:
+                out.append(self._row_to_dict(row_number, raw))
+        LOG.info("Found %d posted rows with URLs", len(out))
+        return out
+
+    def _row_to_dict(self, row_number: int, raw: list[str]) -> dict[str, Any]:
+        return {
+            "row_number": row_number,
+            "raw": raw,
+            "sno": self._cell(raw, "sno"),
+            "date": self._cell(raw, "date"),
+            "topic": self._cell(raw, "topic"),
+            "angle": self._cell(raw, "angle"),
+            "key_points": self._cell(raw, "key_points"),
+            "voice": self._cell(raw, "voice"),
+            "hook_style": self._cell(raw, "hook_style"),
+            "link": self._cell(raw, "link"),
+            "cta": self._cell(raw, "cta"),
+            "status": self._cell(raw, "status"),
+            "post_url": self._cell(raw, "post_url"),
+            "reach_score": self._cell(raw, "reach_score"),
+            "notes": self._cell(raw, "notes"),
+            "generated_by": self._cell(raw, "generated_by"),
+        }
 
     def _cell(self, row: list[str], key: str) -> str:
         idx = self.col_idx.get(key)
@@ -115,8 +141,8 @@ class SheetClient:
             return ""
         return str(row[idx]).strip()
 
+    @with_http_retries
     def update_row(self, row_number: int, updates: dict[str, str]) -> None:
-        """Write multiple columns on a single row. Only touches mapped columns."""
         for key, value in updates.items():
             idx = self.col_idx.get(key)
             if idx is None:
@@ -125,10 +151,10 @@ class SheetClient:
             col_letter = gspread.utils.rowcol_to_a1(1, idx + 1).rstrip("1")
             cell = f"{col_letter}{row_number}"
             self.queue_ws.update(cell, [[value]])
-            LOG.info("Wrote row=%s %s=%r", row_number, key, value[:60])
+            LOG.info("Wrote row=%s %s=%r", row_number, key, str(value)[:60])
 
+    @with_http_retries
     def append_to_notes(self, row_number: int, note_line: str) -> None:
-        """Append a timestamped line to the Notes column (preserves existing notes)."""
         idx = self.col_idx.get("notes")
         if idx is None:
             LOG.warning("No 'notes' column mapped — skipping note append")
@@ -141,6 +167,7 @@ class SheetClient:
         self.queue_ws.update(cell, [[new_value]])
         LOG.info("Appended note on row=%s: %s", row_number, note_line[:80])
 
+    @with_http_retries
     def append_auto_row(
         self,
         sno: str,
@@ -149,7 +176,6 @@ class SheetClient:
         voice: str = "thoughtful",
         status: str = "pending",
     ) -> int:
-        """Append a fully-populated auto-generated row to the queue. Returns its row number."""
         new_row = [""] * len(self.headers)
         fields = {
             "sno": sno,
@@ -172,6 +198,7 @@ class SheetClient:
 
     # ----------------------------------------------------------- state tab (key/value)
 
+    @with_http_retries
     def state_get(self, key: str, default: Any = None) -> Any:
         rows = self.state_ws.get_all_values()
         for r in rows[1:]:
@@ -184,6 +211,7 @@ class SheetClient:
                 return default
         return default
 
+    @with_http_retries
     def state_set(self, key: str, value: Any) -> None:
         rows = self.state_ws.get_all_values()
         serialized = json.dumps(value) if not isinstance(value, str) else value

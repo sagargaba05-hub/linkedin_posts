@@ -1,0 +1,40 @@
+[project]
+name = "linkedin-posts"
+version = "0.2.0"
+description = "Daily LinkedIn post automation with Slack approval and engagement feedback loop"
+requires-python = ">=3.11"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["prompts/", "docs/"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes (unused imports, undefined names)
+    "W",    # pycodestyle warnings
+    "I",    # isort (import ordering)
+    "B",    # flake8-bugbear (likely bugs)
+    "C4",   # flake8-comprehensions (cleaner comprehensions)
+    "UP",   # pyupgrade (use modern Python features)
+    "SIM",  # flake8-simplify (cleaner code)
+]
+ignore = [
+    "E501",  # line-too-long — we have prompt strings that are intentionally long
+    "B008",  # function call in default arg — fine for our use
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]  # asserts in tests are fine
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --strict-markers"

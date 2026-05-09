@@ -1,5 +1,6 @@
 """
-slack_helpers.py — Posting drafts, reading thread replies, posting follow-ups.
+slack_helpers.py — posting drafts, reading thread replies, follow-ups.
+All API calls go through retry + circuit-breaker decorators.
 """
 
 from __future__ import annotations
@@ -7,13 +8,19 @@ from __future__ import annotations
 from typing import Optional
 
 from slack_sdk import WebClient
-from slack_sdk.errors import SlackApiError
 
-from config import get_logger
+from config import get_logger, is_staging
+from reliability import slack_breaker, with_circuit, with_http_retries
 
 LOG = get_logger("slack")
 
 
+def _staging_prefix() -> str:
+    return "[STAGING] " if is_staging() else ""
+
+
+@with_circuit(slack_breaker)
+@with_http_retries
 def post_draft(
     client: WebClient,
     channel_id: str,
@@ -25,7 +32,8 @@ def post_draft(
 ) -> str:
     """Post a new draft message. Returns the thread_ts (timestamp of the parent).
     Posts are text-only — no image suggestion (kept the approve→post path frictionless)."""
-    parts = [f":rocket: *Today's LinkedIn Draft (SNo. {sno})*", "", draft, "", "---"]
+    prefix = _staging_prefix()
+    parts = [f":rocket: *{prefix}Today's LinkedIn Draft (SNo. {sno})*", "", draft, "", "---"]
 
     if critic_verdict == "PASS":
         verdict_line = ":white_check_mark: *Critic verdict:* PASS"
@@ -46,7 +54,7 @@ def post_draft(
         "• `reject`",
         "• `regenerate: <your feedback>`",
         "",
-        ":bulb: To reply in-thread: hover the message → click the speech-bubble \"Reply in thread\" icon.",
+        ':bulb: To reply in-thread: hover the message → click the speech-bubble "Reply in thread" icon.',
     ])
     text = "\n".join(parts)
     resp = client.chat_postMessage(channel=channel_id, text=text)
@@ -55,11 +63,13 @@ def post_draft(
     return resp["ts"]
 
 
+@with_circuit(slack_breaker)
+@with_http_retries
 def repost_in_thread(
-    client: WebClient, channel_id: str, thread_ts: str, sno: str, draft: str
+    client: WebClient, channel_id: str, thread_ts: str, sno: str, draft: str,
 ) -> None:
     text = (
-        f":arrows_counterclockwise: *Regenerated draft (SNo. {sno})*\n\n"
+        f":arrows_counterclockwise: *{_staging_prefix()}Regenerated draft (SNo. {sno})*\n\n"
         f"{draft}\n\n"
         f"---\n"
         f"Reply with `approve`, `reject`, or `regenerate: <feedback>`."
@@ -68,11 +78,13 @@ def repost_in_thread(
     LOG.info("Reposted regenerated draft in thread %s", thread_ts)
 
 
+@with_circuit(slack_breaker)
+@with_http_retries
 def get_latest_user_reply(
-    client: WebClient, channel_id: str, thread_ts: str, bot_user_id: str
+    client: WebClient, channel_id: str, thread_ts: str, bot_user_id: str,
 ) -> Optional[str]:
-    """Return text of the latest non-bot reply in the thread, or None.
-    Verbose logs let us see what's in the thread when something looks wrong."""
+    """Return text of the latest non-bot reply in the thread, or None."""
+    from slack_sdk.errors import SlackApiError
     try:
         resp = client.conversations_replies(channel=channel_id, ts=thread_ts, limit=50)
     except SlackApiError as e:
@@ -90,7 +102,7 @@ def get_latest_user_reply(
         )
 
     user_replies = []
-    for m in msgs[1:]:  # skip parent
+    for m in msgs[1:]:
         if m.get("user") == bot_user_id:
             continue
         if m.get("bot_id"):
@@ -106,11 +118,15 @@ def get_latest_user_reply(
     return latest
 
 
+@with_circuit(slack_breaker)
+@with_http_retries
 def post_followup(client: WebClient, channel_id: str, thread_ts: str, text: str) -> None:
     client.chat_postMessage(channel=channel_id, thread_ts=thread_ts, text=text)
     LOG.info("Posted follow-up in thread %s: %s", thread_ts, text[:80])
 
 
+@with_circuit(slack_breaker)
+@with_http_retries
 def get_bot_user_id(client: WebClient) -> str:
     resp = client.auth_test()
     bot_id = resp["user_id"]

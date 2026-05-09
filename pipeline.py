@@ -1,16 +1,20 @@
 """
-pipeline.py — the two top-level phases of each tick:
+pipeline.py — three top-level phases per tick:
 
-1) process_pending_drafts — for every draft that's been posted to Slack but not
-   yet resolved, look at the thread and act on `approve` / `reject` /
-   `regenerate: <feedback>` replies.
+  Phase 1: sync_engagement_metrics_phase()
+           Pull fresh likes/comments for posted rows, write reach_score back.
 
-2) maybe_generate_daily_draft — once per day after the configured hour, pick the
-   next pending row from the sheet (or fall back to a topics.md theme) and post
-   a fresh draft to Slack.
+  Phase 2: process_pending_drafts()
+           For each in-flight draft, check Slack thread; act on approve/reject/regenerate.
+           Idempotency-protected: each draft has a UUID; the LinkedIn POST and the
+           sheet status-write are only done once per (key, op) pair.
 
-All sheet-write logic lives here so the audit trail (Notes column updates) is
-consistent across phases.
+  Phase 3: maybe_generate_daily_draft()
+           Once per day after the configured hour, pick the next pending row
+           (or fall back to topics.md), pull top-performing past posts as
+           few-shot context, generate a draft, post it to Slack.
+
+Phase 1 runs every tick. Phase 2 runs every tick. Phase 3 runs at most once a day.
 """
 
 from __future__ import annotations
@@ -20,15 +24,31 @@ from datetime import datetime, timedelta
 from anthropic import Anthropic
 from slack_sdk import WebClient
 
-from config import DAILY_DRAFT_HOUR, get_logger, now_iso, now_local, today_str
+from config import (
+    ABANDONED_DRAFT_HOURS,
+    DAILY_DRAFT_HOUR,
+    get_logger,
+    now_iso,
+    now_local,
+    today_str,
+)
+from engagement import (
+    format_top_posts_for_prompt,
+    load_top_performing_posts,
+    sync_engagement_metrics,
+)
 from generator import (
     DraftRequest,
-    GenerationResult,
-    generate_draft,
     generate_post,
     pick_fallback_topic,
 )
-from linkedin_api import publish_post
+from linkedin_api import LinkedInTokenRejected, get_member_id, publish_post
+from observability import (
+    alert_token_rejected,
+    maybe_alert_token_expiry,
+    record_token_first_seen,
+)
+from reliability import IdempotencyRegistry, new_idempotency_key
 from sheets import SheetClient
 from slack_helpers import (
     get_latest_user_reply,
@@ -39,13 +59,9 @@ from slack_helpers import (
 
 LOG = get_logger("pipeline")
 
-# Drafts that have been sitting in 'drafted' state with no user reply for this
-# many hours are auto-abandoned so they stop polluting future runs.
-ABANDONED_DRAFT_HOURS = 36
-
 
 # --------------------------------------------------------------------------- #
-# Member-ID bootstrap                                                         #
+# Member-ID bootstrap                                                          #
 # --------------------------------------------------------------------------- #
 
 
@@ -53,22 +69,41 @@ def ensure_member_id(state: SheetClient, token: str) -> str:
     cached = state.state_get("linkedin_member_id")
     if cached:
         LOG.info("Using cached LinkedIn member_id from state")
+        record_token_first_seen(state.state_get, state.state_set, cached)
         return cached
-    from linkedin_api import get_member_id  # late import to keep modules loose
     member_id = get_member_id(token)
     state.state_set("linkedin_member_id", member_id)
+    record_token_first_seen(state.state_get, state.state_set, member_id)
     return member_id
 
 
 # --------------------------------------------------------------------------- #
-# Phase 1: process replies                                                    #
+# Phase 1: engagement metrics                                                  #
+# --------------------------------------------------------------------------- #
+
+
+def sync_engagement_metrics_phase(
+    state: SheetClient,
+    slack: WebClient,
+    channel_id: str,
+    linkedin_token: str,
+) -> None:
+    """Pull fresh stats for all posted rows and update Reach score."""
+    try:
+        sync_engagement_metrics(state, linkedin_token)
+    except LinkedInTokenRejected:
+        alert_token_rejected(slack, channel_id)
+        raise
+    except Exception:
+        LOG.exception("sync_engagement_metrics failed (non-fatal)")
+
+
+# --------------------------------------------------------------------------- #
+# Phase 2: process replies                                                     #
 # --------------------------------------------------------------------------- #
 
 
 def _gc_abandoned_drafts(drafts: list[dict]) -> bool:
-    """Mark drafts older than ABANDONED_DRAFT_HOURS that are still 'drafted'
-    (no user reply ever came) as 'abandoned' so we stop polling them.
-    Returns True if anything changed."""
     cutoff = now_local() - timedelta(hours=ABANDONED_DRAFT_HOURS)
     changed = False
     for d in drafts:
@@ -98,12 +133,14 @@ def process_pending_drafts(
     linkedin_token: str,
     member_id: str,
     dry_run: bool,
+    registry: IdempotencyRegistry,
 ) -> None:
     drafts: list[dict] = state.state_get("drafts", [])
     LOG.info("State holds %d total drafts", len(drafts))
     for i, d in enumerate(drafts):
-        LOG.info("  drafts[%d] sno=%s status=%s thread_ts=%s",
-                 i, d.get("sno"), d.get("status"), d.get("thread_ts"))
+        LOG.info("  drafts[%d] sno=%s status=%s thread_ts=%s key=%s",
+                 i, d.get("sno"), d.get("status"), d.get("thread_ts"),
+                 d.get("idempotency_key", "(none)"))
     if not drafts:
         return
 
@@ -113,6 +150,12 @@ def process_pending_drafts(
         if d.get("status") != "drafted":
             LOG.info("Skipping SNo. %s (status=%s)", d.get("sno"), d.get("status"))
             continue
+
+        # Migrate older drafts that pre-date idempotency keys
+        if not d.get("idempotency_key"):
+            d["idempotency_key"] = new_idempotency_key()
+            LOG.info("Backfilled idempotency_key for legacy draft sno=%s", d["sno"])
+            changed = True
 
         thread_ts = d["thread_ts"]
         LOG.info("Checking SNo. %s thread for replies", d.get("sno"))
@@ -125,19 +168,16 @@ def process_pending_drafts(
 
         if reply_lc.startswith("approve"):
             _handle_approve(d, state, slack, channel_id, thread_ts,
-                            linkedin_token, member_id, dry_run)
+                            linkedin_token, member_id, dry_run, registry)
             changed = True
-
         elif reply_lc.startswith("reject"):
-            _handle_reject(d, state, slack, channel_id, thread_ts)
+            _handle_reject(d, state, slack, channel_id, thread_ts, registry)
             changed = True
-
         elif reply_lc.startswith("regenerate"):
             feedback = reply.split(":", 1)[1].strip() if ":" in reply else ""
             _handle_regenerate(d, state, slack, anthropic_client,
                                channel_id, thread_ts, feedback)
             changed = True
-
         else:
             if not d.get("nudged"):
                 post_followup(
@@ -156,27 +196,53 @@ def _handle_approve(
     d: dict, state: SheetClient, slack: WebClient,
     channel_id: str, thread_ts: str,
     linkedin_token: str, member_id: str, dry_run: bool,
+    registry: IdempotencyRegistry,
 ) -> None:
-    LOG.info("SNo. %s approved — publishing", d["sno"])
+    key = d["idempotency_key"]
+    LOG.info("SNo. %s approved — publishing (key=%s)", d["sno"], key)
+
+    # Idempotency: skip the LinkedIn POST if we already did it for this key
+    if registry.has_completed(key, "linkedin_publish"):
+        LOG.warning("Already published for key=%s — skipping duplicate POST", key)
+        post_followup(
+            slack, channel_id, thread_ts,
+            ":information_source: This draft was already published to LinkedIn — skipping duplicate.",
+        )
+        d["status"] = "posted"
+        return
+
     try:
         if dry_run:
             post_url = "https://example.com/dry-run-post"
             LOG.info("[DRY_RUN] Skipping LinkedIn POST")
         else:
-            post_url = publish_post(linkedin_token, member_id, d["draft"])
+            post_url, _urn = publish_post(linkedin_token, member_id, d["draft"])
+        registry.mark_completed(key, "linkedin_publish")
+
         d["status"] = "posted"
         d["post_url"] = post_url
         d["posted_at"] = now_iso()
-        # Write to sheet: status, post_url, generated_by (if not already set)
-        updates = {"status": "posted", "post_url": post_url}
-        if not d.get("is_auto") and not d.get("generated_by_written"):
-            updates["generated_by"] = "Sagar"
-            d["generated_by_written"] = True
-        state.update_row(d["row_number"], updates)
-        state.append_to_notes(d["row_number"], f"Posted to LinkedIn: {post_url}")
+
+        # Idempotency: only update sheet status once
+        if not registry.has_completed(key, "sheet_status_posted"):
+            updates = {"status": "posted", "post_url": post_url}
+            if not d.get("is_auto") and not d.get("generated_by_written"):
+                updates["generated_by"] = "Sagar"
+                d["generated_by_written"] = True
+            state.update_row(d["row_number"], updates)
+            state.append_to_notes(d["row_number"], f"Posted to LinkedIn: {post_url}")
+            registry.mark_completed(key, "sheet_status_posted")
+
         post_followup(
             slack, channel_id, thread_ts,
             f":white_check_mark: Posted to LinkedIn: {post_url}",
+        )
+    except LinkedInTokenRejected:
+        from observability import alert_token_rejected
+        alert_token_rejected(slack, channel_id)
+        post_followup(
+            slack, channel_id, thread_ts,
+            ":x: LinkedIn token expired. Will retry once you've rotated the token.",
         )
     except Exception as e:
         LOG.exception("LinkedIn publish failed for SNo. %s", d["sno"])
@@ -188,12 +254,15 @@ def _handle_approve(
 
 def _handle_reject(
     d: dict, state: SheetClient, slack: WebClient,
-    channel_id: str, thread_ts: str,
+    channel_id: str, thread_ts: str, registry: IdempotencyRegistry,
 ) -> None:
     LOG.info("SNo. %s rejected", d["sno"])
     d["status"] = "rejected"
-    state.update_row(d["row_number"], {"status": "rejected"})
-    state.append_to_notes(d["row_number"], "Rejected via Slack — skipped.")
+    key = d["idempotency_key"]
+    if not registry.has_completed(key, "sheet_status_rejected"):
+        state.update_row(d["row_number"], {"status": "rejected"})
+        state.append_to_notes(d["row_number"], "Rejected via Slack — skipped.")
+        registry.mark_completed(key, "sheet_status_rejected")
     post_followup(
         slack, channel_id, thread_ts,
         ":no_entry_sign: Marked as rejected. Skipping.",
@@ -216,12 +285,15 @@ def _handle_regenerate(
         feedback=feedback,
     )
     try:
-        new_draft = generate_draft(anthropic_client, req)
-        d["draft"] = new_draft
+        # Use the same top-posts context the original generation had
+        top_block = d.get("top_posts_block", "")
+        from generator import generate_post as _gen
+        result = _gen(anthropic_client, req, top_posts_block=top_block)
+        d["draft"] = result.draft
         history = d.get("regen_history", [])
         history.append({"at": now_iso(), "feedback": feedback})
         d["regen_history"] = history
-        repost_in_thread(slack, channel_id, thread_ts, d["sno"], new_draft)
+        repost_in_thread(slack, channel_id, thread_ts, d["sno"], result.draft)
         state.append_to_notes(d["row_number"], f"Regenerate requested. Feedback: {feedback}")
     except Exception as e:
         LOG.exception("Regeneration failed")
@@ -232,13 +304,11 @@ def _handle_regenerate(
 
 
 # --------------------------------------------------------------------------- #
-# Phase 2: maybe generate today's draft                                       #
+# Phase 3: maybe generate today's draft                                       #
 # --------------------------------------------------------------------------- #
 
 
 def _effective_sno(row: dict) -> str:
-    """Each row needs a stable identifier for state tracking. If the user left
-    SNo. blank (very common when adding new rows), fall back to row number."""
     if row.get("sno"):
         return row["sno"]
     return f"row-{row.get('row_number', 'unknown')}"
@@ -247,11 +317,6 @@ def _effective_sno(row: dict) -> str:
 def _select_next_pending(
     pending_rows: list[dict], in_flight_snos: set,
 ) -> dict | None:
-    """Pick the next pending row to draft. Rules:
-       - Skip rows whose Topic is empty (would produce useless drafts)
-       - Skip rows whose effective SNo is already in flight
-       - Prefer earliest parseable Date; fallback to row number
-       Sets each picked row's 'sno' to its effective SNo so callers can use it."""
     eligible = []
     for r in pending_rows:
         if not r.get("topic", "").strip():
@@ -261,7 +326,6 @@ def _select_next_pending(
         if eff_sno in in_flight_snos:
             LOG.info("Skipping sno=%s — already in flight", eff_sno)
             continue
-        # Annotate the row with its effective SNo for downstream use
         r["sno"] = eff_sno
         eligible.append(r)
 
@@ -292,7 +356,8 @@ def _select_next_pending(
 
 
 def maybe_generate_daily_draft(
-    state: SheetClient, slack: WebClient, anthropic_client: Anthropic, channel_id: str,
+    state: SheetClient, slack: WebClient, anthropic_client: Anthropic,
+    channel_id: str, registry: IdempotencyRegistry,
 ) -> None:
     now = now_local()
     today = today_str()
@@ -305,38 +370,50 @@ def maybe_generate_daily_draft(
                  now.hour, DAILY_DRAFT_HOUR)
         return
 
+    # Idempotency: also guard the "I drafted today" flag with the registry,
+    # so two ticks racing can't both decide to generate.
+    today_op = f"daily_draft_{today}"
+    if registry.has_completed("daily", today_op):
+        LOG.info("daily_draft_%s already completed (idempotency) — skipping", today)
+        # And ensure last_drafted_date is set in case state got out of sync
+        state.state_set("last_drafted_date", today)
+        return
+
     LOG.info("Generating daily draft for %s", today)
 
     pending = state.fetch_pending_rows()
     drafts: list[dict] = state.state_get("drafts", [])
     in_flight = {d["sno"] for d in drafts if d.get("status") in ("drafted", "posted")}
 
+    # Pull engagement-feedback few-shots
+    top_posts = load_top_performing_posts(state, state.state_get)
+    top_block = format_top_posts_for_prompt(top_posts)
+
     pick = _select_next_pending(pending, in_flight)
 
     if pick:
-        _draft_from_row(pick, state, slack, anthropic_client, channel_id, drafts, now)
+        _draft_from_row(pick, state, slack, anthropic_client, channel_id,
+                        drafts, now, top_block)
     else:
-        _draft_from_fallback_theme(state, slack, anthropic_client, channel_id, drafts, now)
+        _draft_from_fallback_theme(state, slack, anthropic_client, channel_id,
+                                   drafts, now, top_block)
 
     state.state_set("drafts", drafts)
     state.state_set("last_drafted_date", today)
+    registry.mark_completed("daily", today_op)
 
 
 def _draft_from_row(
     pick: dict, state: SheetClient, slack: WebClient, anthropic_client: Anthropic,
-    channel_id: str, drafts: list[dict], now,
+    channel_id: str, drafts: list[dict], now, top_block: str,
 ) -> None:
     LOG.info("Drafting from sheet row %d (SNo. %s)", pick["row_number"], pick["sno"])
     req = DraftRequest(
-        topic=pick["topic"],
-        angle=pick["angle"],
-        key_points=pick["key_points"],
-        voice=pick["voice"] or "thoughtful",
-        hook_style=pick["hook_style"],
-        link=pick["link"],
-        cta=pick["cta"],
+        topic=pick["topic"], angle=pick["angle"], key_points=pick["key_points"],
+        voice=pick["voice"] or "thoughtful", hook_style=pick["hook_style"],
+        link=pick["link"], cta=pick["cta"],
     )
-    result = generate_post(anthropic_client, req)
+    result = generate_post(anthropic_client, req, top_posts_block=top_block)
     thread_ts = post_draft(
         slack, channel_id, pick["sno"], result.draft,
         critic_verdict=result.critic_verdict,
@@ -348,6 +425,7 @@ def _draft_from_row(
         "sno": pick["sno"],
         "row_number": pick["row_number"],
         "thread_ts": thread_ts,
+        "idempotency_key": new_idempotency_key(),
         "draft": result.draft,
         "plan": result.plan,
         "topic": pick["topic"],
@@ -361,6 +439,7 @@ def _draft_from_row(
         "drafted_at": now.isoformat(),
         "is_auto": False,
         "critic_verdict": result.critic_verdict,
+        "top_posts_block": top_block,
     })
 
     updates = {"status": "drafted"}
@@ -376,7 +455,7 @@ def _draft_from_row(
 
 def _draft_from_fallback_theme(
     state: SheetClient, slack: WebClient, anthropic_client: Anthropic,
-    channel_id: str, drafts: list[dict], now,
+    channel_id: str, drafts: list[dict], now, top_block: str,
 ) -> None:
     LOG.info("No pending rows — using topics.md fallback")
     used_recently = state.state_get("recent_fallback_themes", [])
@@ -385,7 +464,7 @@ def _draft_from_fallback_theme(
     state.state_set("recent_fallback_themes", used_recently)
 
     req = DraftRequest(topic=theme, voice="thoughtful")
-    result = generate_post(anthropic_client, req)
+    result = generate_post(anthropic_client, req, top_posts_block=top_block)
 
     auto_sno = f"auto-{today_str()}"
     try:
@@ -407,6 +486,7 @@ def _draft_from_fallback_theme(
         "sno": auto_sno,
         "row_number": row_number,
         "thread_ts": thread_ts,
+        "idempotency_key": new_idempotency_key(),
         "draft": result.draft,
         "plan": result.plan,
         "topic": theme,
@@ -420,6 +500,7 @@ def _draft_from_fallback_theme(
         "drafted_at": now.isoformat(),
         "is_auto": True,
         "critic_verdict": result.critic_verdict,
+        "top_posts_block": top_block,
     })
 
     if row_number:
@@ -429,3 +510,17 @@ def _draft_from_fallback_theme(
             f"Critic={result.critic_verdict}, revisions={result.revision_count}. "
             f"Slack thread {thread_ts}",
         )
+
+
+# --------------------------------------------------------------------------- #
+# Token expiry monitor                                                        #
+# --------------------------------------------------------------------------- #
+
+
+def check_token_expiry(
+    state: SheetClient, slack: WebClient, channel_id: str, member_id: str,
+) -> None:
+    try:
+        maybe_alert_token_expiry(slack, channel_id, state.state_get, state.state_set, member_id)
+    except Exception:
+        LOG.exception("Token expiry check failed (non-fatal)")

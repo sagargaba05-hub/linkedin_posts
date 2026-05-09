@@ -1,134 +1,120 @@
-# LinkedIn Posting Automation
+# LinkedIn Posting Automation (v2)
 
-Daily LinkedIn post generation, Slack-based review, and auto-publishing — running on GitHub Actions, no local machine required.
+Daily LinkedIn post generation, Slack-based review, automatic publishing, and an engagement feedback loop — running on GitHub Actions, no local machine required.
 
 ## How it works
 
-Every 15 minutes, GitHub Actions runs `linkedin_automation.py`, which does two things:
+Every 15 minutes, a GitHub Actions workflow runs `linkedin_automation.py`. Each tick does three phases:
 
-1. **Process replies.** For any draft already posted to Slack and waiting on a decision, check the thread for `approve` / `reject` / `regenerate: <feedback>` replies and act accordingly.
-2. **Generate today's draft (once per day, after the configured hour).** Pick the next pending row from your Google Sheet and post a fresh draft to `#linkedin-posts`. If the sheet has no pending rows, fall back to a topic from `prompts/topics.md`.
+1. **Engagement sync.** For every previously-posted row, fetch likes/comments from LinkedIn and write a freshly-computed `Reach score` back to the sheet.
+2. **Process Slack replies.** For every in-flight draft, look at its Slack thread and act on `approve` / `reject` / `regenerate: <feedback>`. Approve publishes to LinkedIn (with idempotency protection — never double-posts).
+3. **Daily draft.** Once per day after 10 AM Sydney, pick the next pending sheet row (or fall back to a topic from `prompts/topics.md`), inject your top-performing past posts as few-shot examples, run a plan→write→critique pipeline, and post the draft to `#linkedin-posts`.
 
-State (which rows are mid-flight, the cached LinkedIn member ID, last-drafted date, recent fallback themes) lives in a hidden `_state` tab inside the same Google Sheet, so the repo never holds runtime state.
+State (drafts in flight, idempotency keys, last-drafted date, member ID) lives in a hidden `_state` tab inside the same Google Sheet, so the repo holds zero runtime state.
 
-## Repository layout
+## Architecture
 
 ```
 linkedin_posts/
-├── linkedin_automation.py        # Entry point. Just orchestrates the modules below.
-├── config.py                     # Env vars, constants, logger factory.
-├── sheets.py                     # Google Sheets adapter (queue tab + _state tab).
-├── slack_helpers.py              # Post drafts, read thread replies, follow-ups.
-├── linkedin_api.py               # /v2/userinfo and /v2/ugcPosts client.
-├── generator.py                  # Anthropic draft generation + prompt loading.
-├── pipeline.py                   # The two top-level phases (process / generate).
-├── prompts/
-│   ├── about_me.md               # USER-EDITABLE: who you are. Read every run.
-│   ├── voice_examples.md         # USER-EDITABLE: voice few-shots. Read every run.
-│   └── topics.md                 # USER-EDITABLE: fallback topic pool.
-├── .github/workflows/automation.yml
-├── requirements.txt
-├── README.md
+├── linkedin_automation.py    # Entry point — wires phases together
+├── config.py                 # Env vars, constants, logger factory
+├── reliability.py            # Retries (tenacity), circuit breakers, idempotency
+├── observability.py          # Slack error alerts, token expiry monitoring
+├── sheets.py                 # Google Sheets adapter (queue + _state tab)
+├── slack_helpers.py          # Slack adapter (post drafts, read replies)
+├── linkedin_api.py           # LinkedIn adapter (publish + fetch stats)
+├── generator.py              # plan→write→critique generation pipeline
+├── engagement.py             # Stats sync + top-posts feedback loop
+├── pipeline.py               # The three phases
+├── prompts/                  # User-editable templates
+│   ├── about_me.md
+│   ├── voice_examples.md
+│   └── topics.md
+├── tests/                    # pytest unit tests
+│   ├── conftest.py
+│   ├── test_selection.py
+│   ├── test_parsing.py
+│   └── test_idempotency.py
+├── docs/
+│   ├── runbook.md            # Day-to-day operations
+│   └── secret_rotation.md    # Secret rotation procedures
+├── .github/workflows/
+│   ├── automation.yml        # Production cron (main branch)
+│   ├── staging.yml           # Staging cron (staging branch)
+│   └── ci.yml                # Ruff + pytest on every PR
+├── pyproject.toml            # Ruff + pytest config
+├── .pre-commit-config.yaml   # Local pre-commit hooks
+├── requirements.txt          # Production deps
+├── requirements-dev.txt      # Dev deps (pytest, ruff)
 └── .gitignore
 ```
 
-Logs are tagged by module (`[main]`, `[config]`, `[sheets]`, `[slack]`, `[linkedin]`, `[gen]`, `[pipeline]`) so you can grep the GitHub Actions logs by component.
+Tagged loggers (`[main]`, `[config]`, `[sheets]`, `[slack]`, `[linkedin]`, `[gen]`, `[pipeline]`, `[reliability]`, `[observability]`, `[engagement]`) make GitHub Actions logs easy to grep.
 
-## Sheet columns the script reads
+## Reliability features
 
-It looks at row 1 for these headers (case-insensitive, parenthesized hints stripped):
+- **Retries with exponential backoff** on every external API call (Sheets, Slack, LinkedIn, Anthropic). Transient 5xx/429 errors recover automatically.
+- **Circuit breakers** per service — if a service is genuinely down, stop hammering it for 5 minutes.
+- **Idempotency keys** on every draft. The LinkedIn POST and sheet status writes are guarded by a `(key, op)` registry stored in the `_state` tab; impossible to double-post even if GitHub Actions misfires.
+- **Abandoned-draft GC** — drafts with no reply after 36 hours are auto-marked `abandoned` so they stop being polled.
+- **Error alerting** — any unhandled exception is posted to your Slack channel as a critical alert with the full traceback.
+- **Token expiry monitoring** — LinkedIn token age is tracked from first-seen; warning at 5 days remaining, critical alert at expiry.
 
-| Column | Used for |
-|---|---|
-| `SNo.` | Row identifier — appears in every Slack message and state log |
-| `Date` | When you'd like this row drafted (used to sort pending rows; not strictly enforced) |
-| `Topic` | The subject |
-| `Angle` | Your unique POV / hot take — single most important field for non-generic output |
-| `Key points` | Bullets of substance to weave in |
-| `Voice` | `thoughtful` / `conversational` / `punchy` |
-| `Hook style` | `question` / `story` / `contrarian` / `stat` |
-| `Link` | Optional URL to include in the post |
-| `CTA` | Optional close-out line |
-| `Status` | `pending` → script picks it up; auto-set to `drafted` / `posted` / `rejected` |
-| `post URL` | Auto-populated with the live LinkedIn URL after publish |
-| `Reach score` | Untouched by the script; you fill in for analytics |
-| `Notes` | Auto-appended audit trail (drafted at, posted at, rejection, regen feedback) |
-| `Generated by (Sagar/Cowork)` | Auto-set to `Sagar` for your rows, `Cowork` for fallback rows |
+## The engagement feedback loop
 
-Any column the script doesn't recognize is left untouched.
+After every approved post, the system automatically:
 
-## Tuning the voice
+1. Records the post URN (used to fetch stats later).
+2. On every subsequent tick, calls LinkedIn's socialActions endpoint to get fresh like + comment counts.
+3. Computes `reach_score = likes + 2 * comments` and writes it back to your sheet's `Reach score` column.
+4. When generating a new draft, loads your top 3 highest-scoring past posts and injects them as few-shot examples in the system prompt.
 
-Three files in `prompts/` shape every draft:
+The model effectively learns over time what your audience engages with, without any manual tuning.
 
-- **`about_me.md`** — who's writing. Be specific. Better-filled = more authentic posts.
-- **`voice_examples.md`** — 3-5 example posts you'd want yours to read like, plus things to avoid. This is the single highest-leverage file for quality.
-- **`topics.md`** — pool used by the AI-trend fallback when your sheet is empty. One topic per line.
+## Sheet columns
 
-You can edit these any time, push to GitHub, and the next tick uses the new prompts. No script changes needed.
+| Column | Read by | Written by |
+|---|---|---|
+| `SNo.` | picker | (you, optional) |
+| `Date` | picker (sort order) | (you) |
+| `Topic` | generator | (you) |
+| `Angle` | generator (most important field for non-generic output) | (you) |
+| `Key points` | generator | (you) |
+| `Voice` | generator (`thoughtful` / `conversational` / `punchy`) | (you) |
+| `Hook style` | generator (`question` / `story` / `contrarian` / `stat`) | (you) |
+| `Link` | generator | (you) |
+| `CTA` | generator | (you) |
+| `Status` | picker | script (`drafted` / `posted` / `rejected`) |
+| `post URL` | engagement-sync | script |
+| `Reach score` | feedback-loop | script (auto-updated every tick) |
+| `Notes` | (audit log only) | script (timestamped audit trail) |
+| `Generated by (Sagar/Cowork)` | (display only) | script (`Sagar` for your rows, `Cowork` for fallbacks) |
 
-## One-time setup
+## Setup, troubleshooting, secret rotation
 
-### 1. Google Cloud service account (for Sheets read/write)
+See [docs/runbook.md](docs/runbook.md) for day-to-day operations and [docs/secret_rotation.md](docs/secret_rotation.md) for credential rotation procedures.
 
-1. <https://console.cloud.google.com/> → create a new project (e.g. `linkedin-poster`).
-2. Sidebar → **APIs & Services → Library** → enable "Google Sheets API" and "Google Drive API".
-3. **APIs & Services → Credentials → Create credentials → Service account.**
-4. Click the new service account → **Keys → Add key → Create new key → JSON**. A file downloads.
-5. Open the JSON, copy the `client_email` value, and **share your LinkedIn queue sheet with that email as Editor.**
+## Local development
 
-### 2. Slack app (for posting drafts and reading approvals)
+```sh
+git clone https://github.com/sagargaba05-hub/linkedin_posts.git
+cd linkedin_posts
+python3 -m venv .venv
+source .venv/bin/activate    # Windows: .venv\Scripts\activate
+pip install -r requirements-dev.txt
+pre-commit install           # Installs git hooks for ruff/format
+pytest -v                    # Runs the test suite
+ruff check .                 # Lints the codebase
+ruff format .                # Auto-formats
+```
 
-1. <https://api.slack.com/apps> → **Create New App → From scratch**.
-2. **OAuth & Permissions → Bot Token Scopes:** `chat:write`, `channels:history`, `channels:read` (add `groups:history`/`groups:read` if your channel is private).
-3. **Install to Workspace** → copy the **Bot User OAuth Token** (`xoxb-...`).
-4. In Slack: `/invite @YourBotName` in `#linkedin-posts`.
-5. Channel ID: open the channel in a web browser; the URL ends with `/C0XXXXXXXX`.
+## Cost expectations
 
-### 3. Anthropic API key
+- Anthropic API: ~$0.025/post = ~$0.75/month for daily posting (with prompt caching + Haiku critic).
+- GitHub Actions: free tier (~30-40 min/month of compute).
+- Google Sheets API: free tier (no usage charges at this scale).
+- LinkedIn API: free.
 
-1. <https://console.anthropic.com/> → **API Keys → Create Key.**
-2. **Plans & Billing → Add credits** ($5 lasts ~a year of daily posts).
+## Disabling temporarily / fully
 
-### 4. LinkedIn access token
-
-LinkedIn dev app → Auth → Token Generator with scopes `w_member_social openid profile`. Tokens last ~60 days; regenerate via the same flow and update the `LINKEDIN_TOKEN` repo secret.
-
-### 5. GitHub repo secrets
-
-Settings → Secrets and variables → Actions. Add:
-
-| Name | Value |
-|---|---|
-| `GOOGLE_SERVICE_ACCOUNT_JSON` | Entire contents of the service-account JSON file |
-| `SHEET_ID` | `115PyzTascK_6pIuG1dfajC4cIAEsIwezkWcn_RcVKEQ` |
-| `ANTHROPIC_API_KEY` | `sk-ant-...` |
-| `SLACK_BOT_TOKEN` | `xoxb-...` |
-| `SLACK_CHANNEL_ID` | `C0B1BRD5PDG` (channel ID, not name) |
-| `LINKEDIN_TOKEN` | Your LinkedIn access token |
-
-## Daily usage
-
-- Add new rows to the sheet whenever you have ideas. Set `Status = pending`, fill in `Topic` and `Angle` at minimum.
-- Each morning after 10 AM IST, a draft lands in `#linkedin-posts`.
-- **Reply in the thread** (hover the message → "Reply in thread") with `approve` / `reject` / `regenerate: <feedback>`.
-- The next 15-min tick acts on your reply: `approve` publishes to LinkedIn and writes the URL back to the sheet.
-
-## Troubleshooting
-
-**No draft appearing.** Check Actions logs. Filter by tag: `[main]` / `[pipeline]` for high-level flow; `[sheets]` for column-mapping or read errors; `[slack]` for thread fetch issues.
-
-**Approve isn't triggering a post.** Most common cause: you replied in the channel as a top-level message instead of *in the thread*. Hover the message → speech-bubble icon → reply. The bot can only see in-thread replies.
-
-**`missing_scope` warnings.** The Slack app needs `channels:history`. Add it under OAuth & Permissions, then reinstall the app to your workspace.
-
-**LinkedIn API returns 401.** Token expired. Regenerate and update the `LINKEDIN_TOKEN` repo secret.
-
-**Want to skip a row?** Set its `Status` to anything other than `pending` (e.g. `skip`).
-
-**Want to force-regenerate today's draft?** In the `_state` tab, clear column B for `last_drafted_date` (and remove that day's entry from the `drafts` row if you want a fully clean state). Next run will draft again.
-
-## Cleanup if you ever want to disable
-
-1. Repo → Settings → Actions → General → **Disable Actions.** Stops the cron immediately.
-2. Optional: delete the GitHub repo, revoke the LinkedIn dev app, revoke the Slack app, delete the service account, delete the Anthropic API key.
+Repo Settings → Actions → General → "Disable Actions" stops the cron immediately. Re-enable any time. For full teardown see the bottom of [docs/runbook.md](docs/runbook.md).

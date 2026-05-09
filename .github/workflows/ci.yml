@@ -1,0 +1,40 @@
+name: ci
+
+# Runs on every PR + every push to main/staging.
+# Blocks merge if ruff or pytest fail.
+on:
+  pull_request:
+    branches: [main, staging]
+  push:
+    branches: [main, staging]
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Lint (ruff)
+        run: |
+          ruff check .
+          ruff format --check .
+
+      - name: Run tests
+        run: pytest -v
