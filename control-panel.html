@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LinkedIn Automation — Control Panel</title>
+<style>
+  :root {
+    --bg: #f5f6f8;
+    --card: #ffffff;
+    --text: #15171a;
+    --muted: #6b7280;
+    --border: #e3e6ea;
+    --accent: #0a66c2;
+    --accent-hover: #084c8d;
+    --success: #057a55;
+    --error: #b42318;
+    --warn: #b45309;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg); color: var(--text); margin: 0; padding: 24px 16px;
+  }
+  .wrap { max-width: 720px; margin: 0 auto; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  p.tag { color: var(--muted); margin: 0 0 24px; }
+  .card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 8px; padding: 20px; margin-bottom: 16px;
+  }
+  .card h2 { font-size: 16px; margin: 0 0 16px; }
+  label { display: block; font-weight: 600; margin: 14px 0 6px; font-size: 14px; }
+  label.inline { display: inline-flex; align-items: center; font-weight: normal; margin: 0; gap: 6px; cursor: pointer; }
+  input[type="text"], input[type="password"], select {
+    width: 100%; padding: 8px 10px; font: inherit;
+    border: 1px solid var(--border); border-radius: 6px;
+    background: #fff;
+  }
+  input:focus, select:focus { outline: none; border-color: var(--accent); }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; }
+  .row > * { flex: 1; min-width: 180px; }
+  .days { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; margin-top: 6px; }
+  .days label { padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; background: #fff; }
+  .days label:has(input:checked) { background: #e9f1fa; border-color: var(--accent); }
+  .switch { display: inline-flex; align-items: center; gap: 10px; }
+  .switch input { width: 38px; height: 22px; appearance: none; background: #ccd1d8; border-radius: 999px; position: relative; cursor: pointer; transition: background .15s; }
+  .switch input:checked { background: var(--success); }
+  .switch input::after { content: ""; position: absolute; top: 2px; left: 2px; width: 18px; height: 18px; background: white; border-radius: 50%; transition: left .15s; }
+  .switch input:checked::after { left: 18px; }
+  button {
+    background: var(--accent); color: white; border: 0;
+    padding: 9px 18px; border-radius: 6px; font: inherit; font-weight: 600;
+    cursor: pointer; transition: background .15s;
+  }
+  button:hover:not(:disabled) { background: var(--accent-hover); }
+  button.secondary { background: white; color: var(--text); border: 1px solid var(--border); }
+  button.secondary:hover:not(:disabled) { background: #f5f6f8; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .actions { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
+  #status {
+    margin-top: 14px; padding: 10px 12px; border-radius: 6px;
+    background: #f0f1f3; color: var(--muted); font-size: 14px;
+    min-height: 40px;
+  }
+  #status.success { background: #d1fae5; color: var(--success); }
+  #status.error { background: #fde2e2; color: var(--error); }
+  #status.warn { background: #fef3c7; color: var(--warn); }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .hint a { color: var(--accent); }
+  details { margin-top: 14px; }
+  summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+  details[open] summary { color: var(--text); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>LinkedIn Automation — Control Panel</h1>
+<p class="tag">Pause the workflow, change the daily post time, pick which days to post — all without touching the repo.</p>
+
+<!-- Connection -->
+<section class="card">
+  <h2>1. Connect to your repo</h2>
+
+  <div class="row">
+    <div>
+      <label for="owner">GitHub owner</label>
+      <input type="text" id="owner" placeholder="e.g. sagargaba05-hub">
+    </div>
+    <div>
+      <label for="repo">Repo name</label>
+      <input type="text" id="repo" placeholder="e.g. linkedin_posts">
+    </div>
+  </div>
+
+  <label for="env">Environment</label>
+  <select id="env">
+    <option value="production">Production (vars: ENABLED, DAILY_DRAFT_HOUR, ENABLED_DAYS)</option>
+    <option value="staging">Staging (vars: STAGING_ENABLED, STAGING_DAILY_DRAFT_HOUR, STAGING_ENABLED_DAYS)</option>
+  </select>
+
+  <label for="pat">Personal Access Token</label>
+  <input type="password" id="pat" placeholder="github_pat_... or ghp_...">
+  <p class="hint">
+    Needs <strong>Variables: Read & write</strong> permission on this repo.
+    Generate one at
+    <a href="https://github.com/settings/tokens?type=beta" target="_blank" rel="noopener">github.com/settings/tokens</a>
+    (Fine-grained PAT recommended — restrict it to just this repo).
+    The token stays in your browser's localStorage; nothing leaves your machine except the API calls to GitHub.
+  </p>
+
+  <div class="actions">
+    <button id="connect-btn">Connect & load current config</button>
+    <button class="secondary" id="forget-btn">Forget saved settings</button>
+  </div>
+</section>
+
+<!-- Configuration -->
+<section class="card" id="config-card" style="display: none">
+  <h2>2. Runtime configuration</h2>
+
+  <label class="switch">
+    <input type="checkbox" id="enabled" checked>
+    <span>Automation enabled</span>
+  </label>
+  <p class="hint">When OFF, every cron tick exits immediately. No posts, no Slack messages, no API calls. Re-enable any time.</p>
+
+  <label for="hour">Daily draft time (Sydney)</label>
+  <select id="hour">
+    <!-- Filled in by JS -->
+  </select>
+  <p class="hint">The earliest cron tick after this hour generates the day's draft.</p>
+
+  <label>Days to post</label>
+  <div class="days" id="days">
+    <label class="inline"><input type="checkbox" value="monday" checked> Monday</label>
+    <label class="inline"><input type="checkbox" value="tuesday" checked> Tuesday</label>
+    <label class="inline"><input type="checkbox" value="wednesday" checked> Wednesday</label>
+    <label class="inline"><input type="checkbox" value="thursday" checked> Thursday</label>
+    <label class="inline"><input type="checkbox" value="friday" checked> Friday</label>
+    <label class="inline"><input type="checkbox" value="saturday"> Saturday</label>
+    <label class="inline"><input type="checkbox" value="sunday"> Sunday</label>
+  </div>
+
+  <div class="actions">
+    <button id="save-btn">Save changes</button>
+    <button class="secondary" id="reload-btn">Reload from GitHub</button>
+  </div>
+
+  <details>
+    <summary>What this writes</summary>
+    <p class="hint">
+      Sets three GitHub Actions Repository Variables on your repo via the REST API:
+      <code>ENABLED</code>, <code>DAILY_DRAFT_HOUR</code>, <code>ENABLED_DAYS</code>
+      (or the <code>STAGING_*</code> equivalents). Your workflow YAML reads these on
+      every run; the Python script gates the daily-draft phase on them.
+    </p>
+  </details>
+</section>
+
+<div id="status">Idle. Enter your repo + PAT and click Connect.</div>
+
+<script>
+"use strict";
+(function() {
+  const $ = (id) => document.getElementById(id);
+  const els = {
+    owner: $("owner"), repo: $("repo"), env: $("env"), pat: $("pat"),
+    connect: $("connect-btn"), forget: $("forget-btn"),
+    save: $("save-btn"), reload: $("reload-btn"),
+    config: $("config-card"),
+    enabled: $("enabled"), hour: $("hour"), days: $("days"),
+    status: $("status"),
+  };
+
+  const STORAGE_KEY = "linkedin_automation_panel_v1";
+
+  // Populate hour dropdown (0-23 with friendly labels)
+  for (let h = 0; h < 24; h++) {
+    const opt = document.createElement("option");
+    opt.value = h;
+    const label = h === 0 ? "12 AM (midnight)"
+                : h < 12  ? `${h} AM`
+                : h === 12 ? "12 PM (noon)"
+                : `${h - 12} PM`;
+    opt.textContent = `${String(h).padStart(2, "0")}:00 — ${label}`;
+    els.hour.appendChild(opt);
+  }
+
+  // Variable name prefixing for staging
+  function varNames() {
+    const prefix = els.env.value === "staging" ? "STAGING_" : "";
+    return {
+      enabled:  prefix + "ENABLED",
+      hour:     prefix + "DAILY_DRAFT_HOUR",
+      days:     prefix + "ENABLED_DAYS",
+    };
+  }
+
+  // ----- Persistent settings (NOT the PAT — see notes below) -----
+  function loadSavedSettings() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
+      if (saved.owner) els.owner.value = saved.owner;
+      if (saved.repo)  els.repo.value  = saved.repo;
+      if (saved.env)   els.env.value   = saved.env;
+      if (saved.pat)   els.pat.value   = saved.pat;
+    } catch {}
+  }
+  function saveSettings() {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      owner: els.owner.value.trim(),
+      repo:  els.repo.value.trim(),
+      env:   els.env.value,
+      pat:   els.pat.value.trim(),
+    }));
+  }
+
+  // ----- Status helpers -----
+  function setStatus(msg, kind) {
+    els.status.textContent = msg;
+    els.status.className = kind || "";
+  }
+
+  // ----- GitHub API helpers -----
+  function ghBase() {
+    const owner = els.owner.value.trim();
+    const repo  = els.repo.value.trim();
+    if (!owner || !repo) throw new Error("Owner and repo required");
+    return `https://api.github.com/repos/${owner}/${repo}/actions/variables`;
+  }
+
+  async function getVariable(name) {
+    const r = await fetch(`${ghBase()}/${name}`, {
+      headers: {
+        "Authorization": `Bearer ${els.pat.value.trim()}`,
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+      },
+    });
+    if (r.status === 404) return null;
+    if (!r.ok) throw new Error(`GET ${name}: ${r.status} ${await r.text()}`);
+    const j = await r.json();
+    return j.value;
+  }
+
+  async function setVariable(name, value) {
+    // PATCH if exists, else POST. We try PATCH first; if 404, fall back to POST.
+    const headers = {
+      "Authorization": `Bearer ${els.pat.value.trim()}`,
+      "Accept": "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      "Content-Type": "application/json",
+    };
+    let r = await fetch(`${ghBase()}/${name}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ name, value }),
+    });
+    if (r.status === 404) {
+      // Variable doesn't exist yet — create
+      r = await fetch(ghBase(), {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ name, value }),
+      });
+    }
+    if (!r.ok) {
+      throw new Error(`SET ${name}: ${r.status} ${await r.text()}`);
+    }
+  }
+
+  // ----- Action handlers -----
+  async function connect() {
+    saveSettings();
+    if (!els.pat.value.trim()) {
+      setStatus("PAT required.", "error"); return;
+    }
+    setStatus("Loading current config from GitHub…");
+    els.connect.disabled = true;
+    try {
+      const v = varNames();
+      const [enabled, hour, days] = await Promise.all([
+        getVariable(v.enabled),
+        getVariable(v.hour),
+        getVariable(v.days),
+      ]);
+      // Apply to UI (use defaults if missing)
+      els.enabled.checked = enabled === null ? true : enabled.toLowerCase() === "true";
+      els.hour.value = hour === null ? "10" : String(parseInt(hour, 10) || 10);
+      const dayList = days === null
+        ? ["monday","tuesday","wednesday","thursday","friday"]
+        : days.split(",").map(s => s.trim().toLowerCase());
+      els.days.querySelectorAll("input[type=checkbox]").forEach(cb => {
+        cb.checked = dayList.includes(cb.value);
+      });
+      els.config.style.display = "block";
+      const missing = [];
+      if (enabled === null) missing.push(v.enabled);
+      if (hour === null)    missing.push(v.hour);
+      if (days === null)    missing.push(v.days);
+      if (missing.length) {
+        setStatus(`Loaded. (${missing.join(", ")} not set yet — defaults shown. Save to create.)`, "warn");
+      } else {
+        setStatus("Loaded current config.", "success");
+      }
+    } catch (e) {
+      setStatus("Error: " + e.message, "error");
+    } finally {
+      els.connect.disabled = false;
+    }
+  }
+
+  async function save() {
+    saveSettings();
+    if (!els.pat.value.trim()) {
+      setStatus("PAT required.", "error"); return;
+    }
+    setStatus("Saving…");
+    els.save.disabled = true;
+    try {
+      const v = varNames();
+      const enabled = els.enabled.checked ? "true" : "false";
+      const hour = String(els.hour.value);
+      const days = Array.from(els.days.querySelectorAll("input[type=checkbox]:checked"))
+        .map(cb => cb.value).join(",");
+      if (!days) {
+        setStatus("Pick at least one day before saving.", "warn");
+        els.save.disabled = false;
+        return;
+      }
+      await setVariable(v.enabled, enabled);
+      await setVariable(v.hour, hour);
+      await setVariable(v.days, days);
+      setStatus("Saved. Next workflow tick will use these values.", "success");
+    } catch (e) {
+      setStatus("Error: " + e.message, "error");
+    } finally {
+      els.save.disabled = false;
+    }
+  }
+
+  function forget() {
+    localStorage.removeItem(STORAGE_KEY);
+    els.owner.value = els.repo.value = els.pat.value = "";
+    els.env.value = "production";
+    els.config.style.display = "none";
+    setStatus("Cleared saved settings.", "warn");
+  }
+
+  // Wire up
+  els.connect.addEventListener("click", connect);
+  els.save.addEventListener("click", save);
+  els.reload.addEventListener("click", connect);
+  els.forget.addEventListener("click", forget);
+
+  loadSavedSettings();
+})();
+</script>
+
+</body>
+</html>

@@ -53,8 +53,12 @@ jobs:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL_ID: ${{ secrets.STAGING_SLACK_CHANNEL_ID }}
           LINKEDIN_TOKEN: ${{ secrets.LINKEDIN_TOKEN }}
+          # Staging uses its own variables (STAGING_*) so prod and staging
+          # can be controlled independently from the control panel.
+          ENABLED: ${{ vars.STAGING_ENABLED || 'true' }}
+          DAILY_DRAFT_HOUR: ${{ vars.STAGING_DAILY_DRAFT_HOUR || '10' }}
+          ENABLED_DAYS: ${{ vars.STAGING_ENABLED_DAYS || 'monday,tuesday,wednesday,thursday,friday' }}
           TZ: "Australia/Sydney"
-          DAILY_DRAFT_HOUR: "10"
           ENVIRONMENT: "staging"
           DRY_RUN: ${{ github.event.inputs.dry_run == 'true' && '1' || '0' }}
         run: python linkedin_automation.py

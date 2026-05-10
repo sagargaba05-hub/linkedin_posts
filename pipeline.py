@@ -26,12 +26,12 @@ from slack_sdk import WebClient
 
 from config import (
     ABANDONED_DRAFT_HOURS,
-    DAILY_DRAFT_HOUR,
     get_logger,
     now_iso,
     now_local,
     today_str,
 )
+from runtime_config import get_daily_draft_hour, is_today_enabled
 from engagement import (
     format_top_posts_for_prompt,
     load_top_performing_posts,
@@ -361,13 +361,19 @@ def maybe_generate_daily_draft(
 ) -> None:
     now = now_local()
     today = today_str()
+
+    # Runtime-config gating (settable via the local control panel)
+    if not is_today_enabled():
+        return  # is_today_enabled() logs the reason
+    daily_hour = get_daily_draft_hour()
+
     last_drafted_date = state.state_get("last_drafted_date", "")
     if last_drafted_date == today:
         LOG.info("Daily draft already generated for %s — skipping", today)
         return
-    if now.hour < DAILY_DRAFT_HOUR:
+    if now.hour < daily_hour:
         LOG.info("Too early (hour=%d, threshold=%d) — skipping daily draft",
-                 now.hour, DAILY_DRAFT_HOUR)
+                 now.hour, daily_hour)
         return
 
     # Idempotency: also guard the "I drafted today" flag with the registry,

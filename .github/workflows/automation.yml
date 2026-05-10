@@ -50,14 +50,21 @@ jobs:
 
       - name: Run automation
         env:
+          # Secrets — set in repo Settings → Secrets and variables → Actions → Secrets
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           SHEET_ID: ${{ secrets.SHEET_ID }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
           LINKEDIN_TOKEN: ${{ secrets.LINKEDIN_TOKEN }}
+          # Runtime config — set via control-panel.html → repo Variables.
+          # Defaults below kick in if a Variable is unset (so prod still works
+          # before you ever open the control panel).
+          ENABLED: ${{ vars.ENABLED || 'true' }}
+          DAILY_DRAFT_HOUR: ${{ vars.DAILY_DRAFT_HOUR || '10' }}
+          ENABLED_DAYS: ${{ vars.ENABLED_DAYS || 'monday,tuesday,wednesday,thursday,friday' }}
+          # Static config — change in this YAML if you ever move timezones
           TZ: "Australia/Sydney"
-          DAILY_DRAFT_HOUR: "10"
           ENVIRONMENT: "production"
           DRY_RUN: ${{ github.event.inputs.dry_run == 'true' && '1' || '0' }}
         run: python linkedin_automation.py

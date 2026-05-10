@@ -43,6 +43,7 @@ from pipeline import (
     sync_engagement_metrics_phase,
 )
 from reliability import IdempotencyRegistry
+from runtime_config import is_enabled
 from sheets import SheetClient
 from slack_helpers import get_bot_user_id
 
@@ -50,9 +51,16 @@ LOG = get_logger("main")
 
 
 def main() -> int:
-    secrets = env_required_all()
     LOG.info("=== tick start at %s (env=%s, dry_run=%s) ===",
              now_iso(), "STAGING" if is_staging() else "PRODUCTION", DRY_RUN)
+
+    # Master kill-switch — settable from the local control panel via vars.ENABLED.
+    # When OFF the script exits immediately. We don't even load secrets.
+    if not is_enabled():
+        LOG.info("Tick exiting early (vars.ENABLED is OFF)")
+        return 0
+
+    secrets = env_required_all()
 
     # Adapters
     state = SheetClient.connect(secrets["SHEET_ID"], secrets["GOOGLE_SERVICE_ACCOUNT_JSON"])
