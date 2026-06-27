@@ -48,7 +48,7 @@ from observability import (
     record_token_first_seen,
 )
 from reliability import IdempotencyRegistry, new_idempotency_key
-from runtime_config import get_daily_draft_hour, is_today_enabled
+from runtime_config import get_daily_draft_hour, is_today_enabled, should_force_daily_draft
 from sheets import SheetClient
 from slack_helpers import (
     get_latest_user_reply,
@@ -408,24 +408,25 @@ def maybe_generate_daily_draft(
 ) -> None:
     now = now_local()
     today = today_str()
+    force_daily_draft = should_force_daily_draft()
 
     # Runtime-config gating (settable via the local control panel)
-    if not is_today_enabled():
+    if not force_daily_draft and not is_today_enabled():
         return  # is_today_enabled() logs the reason
     daily_hour = get_daily_draft_hour()
 
     last_drafted_date = state.state_get("last_drafted_date", "")
-    if last_drafted_date == today:
+    if not force_daily_draft and last_drafted_date == today:
         LOG.info("Daily draft already generated for %s — skipping", today)
         return
-    if now.hour < daily_hour:
+    if not force_daily_draft and now.hour < daily_hour:
         LOG.info("Too early (hour=%d, threshold=%d) — skipping daily draft", now.hour, daily_hour)
         return
 
     # Idempotency: also guard the "I drafted today" flag with the registry,
     # so two ticks racing can't both decide to generate.
     today_op = f"daily_draft_{today}"
-    if registry.has_completed("daily", today_op):
+    if not force_daily_draft and registry.has_completed("daily", today_op):
         LOG.info("daily_draft_%s already completed (idempotency) — skipping", today)
         # And ensure last_drafted_date is set in case state got out of sync
         state.state_set("last_drafted_date", today)

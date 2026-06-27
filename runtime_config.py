@@ -20,6 +20,7 @@ LOG = get_logger("runtime_config")
 DEFAULT_ENABLED = "true"
 DEFAULT_DAILY_DRAFT_HOUR = "10"
 DEFAULT_ENABLED_DAYS = "monday,tuesday,wednesday,thursday,friday"
+DEFAULT_FORCE_DAILY_DRAFT = "false"
 
 # Map normalized day strings -> Python weekday() values (Mon=0)
 DAY_NAMES = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
@@ -74,3 +75,12 @@ def is_today_enabled() -> bool:
             sorted(enabled_days),
         )
     return allowed
+
+
+def should_force_daily_draft() -> bool:
+    """Manual workflow override for ad-hoc Slack draft tests."""
+    raw = env("FORCE_DAILY_DRAFT", DEFAULT_FORCE_DAILY_DRAFT).strip().lower()
+    forced = raw in ("true", "1", "yes", "on")
+    if forced:
+        LOG.info("FORCE_DAILY_DRAFT is ON; bypassing daily draft schedule gates")
+    return forced

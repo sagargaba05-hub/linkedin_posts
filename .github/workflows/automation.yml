@@ -17,6 +17,14 @@ on:
         options:
           - "true"
           - "false"
+      force_daily_draft:
+        description: "Generate a Slack draft now, ignoring day/hour/once-per-day gates"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "true"
+          - "false"
 
 # Only run on main — staging branch has its own workflow
 permissions:
@@ -67,4 +75,5 @@ jobs:
           TZ: "Australia/Sydney"
           ENVIRONMENT: "production"
           DRY_RUN: ${{ github.event.inputs.dry_run == 'true' && '1' || '0' }}
+          FORCE_DAILY_DRAFT: ${{ github.event.inputs.force_daily_draft == 'true' && '1' || '0' }}
         run: python linkedin_automation.py
