@@ -51,8 +51,11 @@ def sync_engagement_metrics(
     for row in posted:
         urn = extract_urn_from_post_url(row["post_url"])
         if not urn:
-            LOG.info("Row %s: post_url=%r doesn't contain a URN — skipping",
-                     row["row_number"], row["post_url"][:60])
+            LOG.info(
+                "Row %s: post_url=%r doesn't contain a URN — skipping",
+                row["row_number"],
+                row["post_url"][:60],
+            )
             summary["skipped"] += 1
             continue
         try:
@@ -61,8 +64,7 @@ def sync_engagement_metrics(
             # Re-raise so caller can alert + stop
             raise
         except Exception as e:
-            LOG.warning("Stats fetch errored for row %s urn=%s: %s",
-                        row["row_number"], urn, e)
+            LOG.warning("Stats fetch errored for row %s urn=%s: %s", row["row_number"], urn, e)
             summary["errored"] += 1
             continue
 
@@ -73,17 +75,21 @@ def sync_engagement_metrics(
         new_score = str(stats["reach_score"])
         existing_score = (row.get("reach_score") or "").strip()
         if existing_score == new_score:
-            LOG.info("Row %s: score unchanged (%s) — skipping write",
-                     row["row_number"], new_score)
+            LOG.info("Row %s: score unchanged (%s) — skipping write", row["row_number"], new_score)
             summary["skipped"] += 1
             continue
 
         try:
             state.update_row(row["row_number"], {"reach_score": new_score})
             summary["synced"] += 1
-            LOG.info("Row %s: reach_score %s -> %s (likes=%s, comments=%s)",
-                     row["row_number"], existing_score or "(blank)", new_score,
-                     stats["likes"], stats["comments"])
+            LOG.info(
+                "Row %s: reach_score %s -> %s (likes=%s, comments=%s)",
+                row["row_number"],
+                existing_score or "(blank)",
+                new_score,
+                stats["likes"],
+                stats["comments"],
+            )
         except Exception as e:
             LOG.warning("Sheet write failed for row %s: %s", row["row_number"], e)
             summary["errored"] += 1
@@ -118,17 +124,20 @@ def load_top_performing_posts(
         d = drafts_by_row.get(row["row_number"])
         if not d or not d.get("draft"):
             continue
-        candidates.append({
-            "topic": row.get("topic") or d.get("topic", ""),
-            "draft": d["draft"],
-            "reach_score": score,
-            "post_url": row.get("post_url", ""),
-        })
+        candidates.append(
+            {
+                "topic": row.get("topic") or d.get("topic", ""),
+                "draft": d["draft"],
+                "reach_score": score,
+                "post_url": row.get("post_url", ""),
+            }
+        )
 
     candidates.sort(key=lambda c: c["reach_score"], reverse=True)
     top = candidates[:limit]
-    LOG.info("Loaded %d top-performing past posts (min_reach=%d, limit=%d)",
-             len(top), min_reach, limit)
+    LOG.info(
+        "Loaded %d top-performing past posts (min_reach=%d, limit=%d)", len(top), min_reach, limit
+    )
     return top
 
 
@@ -142,9 +151,7 @@ def format_top_posts_for_prompt(top_posts: list[dict[str, Any]]) -> str:
         "engages with:\n",
     ]
     for i, p in enumerate(top_posts, start=1):
-        lines.append(
-            f"--- Top post #{i} (reach_score={p['reach_score']}, topic: {p['topic']}) ---"
-        )
+        lines.append(f"--- Top post #{i} (reach_score={p['reach_score']}, topic: {p['topic']}) ---")
         lines.append(p["draft"])
         lines.append("")
     return "\n".join(lines)

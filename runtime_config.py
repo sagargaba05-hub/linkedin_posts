@@ -43,8 +43,7 @@ def get_daily_draft_hour() -> int:
             return h
     except ValueError:
         pass
-    LOG.warning("DAILY_DRAFT_HOUR=%r is invalid; using default %s",
-                raw, DEFAULT_DAILY_DRAFT_HOUR)
+    LOG.warning("DAILY_DRAFT_HOUR=%r is invalid; using default %s", raw, DEFAULT_DAILY_DRAFT_HOUR)
     return int(DEFAULT_DAILY_DRAFT_HOUR)
 
 
@@ -69,6 +68,9 @@ def is_today_enabled() -> bool:
     enabled_days = get_enabled_days()
     allowed = today_name in enabled_days
     if not allowed:
-        LOG.info("Today is %s — not in ENABLED_DAYS=%s; daily draft will skip",
-                 today_name, sorted(enabled_days))
+        LOG.info(
+            "Today is %s — not in ENABLED_DAYS=%s; daily draft will skip",
+            today_name,
+            sorted(enabled_days),
+        )
     return allowed

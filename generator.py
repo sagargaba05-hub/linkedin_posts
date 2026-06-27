@@ -13,7 +13,6 @@ import random
 import re
 import time
 from dataclasses import dataclass
-from typing import Optional
 
 from anthropic import Anthropic
 
@@ -65,12 +64,12 @@ def load_topics() -> list[str]:
             continue
         for prefix in ("- ", "* ", "+ "):
             if line.startswith(prefix):
-                line = line[len(prefix):].strip()
+                line = line[len(prefix) :].strip()
                 break
         else:
             m = re.match(r"^\d+[.)]\s+", line)
             if m:
-                line = line[m.end():].strip()
+                line = line[m.end() :].strip()
         if not line:
             continue
         if line.startswith(("[", "(")):
@@ -160,7 +159,9 @@ def build_system_prompt(top_posts_block: str = "") -> str:
 
     voice_ex = load_voice_examples()
     if voice_ex:
-        parts.append("VOICE REFERENCE — emulate this style and avoid the listed traps:\n" + voice_ex)
+        parts.append(
+            "VOICE REFERENCE — emulate this style and avoid the listed traps:\n" + voice_ex
+        )
 
     if top_posts_block:
         parts.append(top_posts_block)
@@ -259,7 +260,9 @@ def _plan_post(client: Anthropic, req: DraftRequest, about_me: str) -> str:
     if about_me:
         parts.append("WHO THE WRITER IS:\n" + about_me)
     if req.feedback:
-        parts.append("USER FEEDBACK on the prior draft (the plan must address this):\n" + req.feedback)
+        parts.append(
+            "USER FEEDBACK on the prior draft (the plan must address this):\n" + req.feedback
+        )
 
     user_prompt = "\n\n".join(parts)
     LOG.info("Planning post (system=%d, user=%d)", len(PLAN_SYSTEM), len(user_prompt))
@@ -283,7 +286,10 @@ def _plan_post(client: Anthropic, req: DraftRequest, about_me: str) -> str:
 @with_circuit(anthropic_breaker)
 @with_http_retries
 def _write_post_from_plan(
-    client: Anthropic, req: DraftRequest, plan: str, top_posts_block: str = "",
+    client: Anthropic,
+    req: DraftRequest,
+    plan: str,
+    top_posts_block: str = "",
 ) -> str:
     fields = [f"Topic: {req.topic}"]
     if req.angle:
@@ -420,10 +426,14 @@ def generate_post(
     if crit["verdict"] in ("REVISE", "FAIL"):
         LOG.info("Critic returned %s — auto-revising once", crit["verdict"])
         revision_req = DraftRequest(
-            topic=req.topic, angle=req.angle, key_points=req.key_points,
-            voice=req.voice, hook_style=req.hook_style, link=req.link, cta=req.cta,
-            feedback=("EDITOR FEEDBACK on previous draft (address every point): "
-                      + crit["notes"]),
+            topic=req.topic,
+            angle=req.angle,
+            key_points=req.key_points,
+            voice=req.voice,
+            hook_style=req.hook_style,
+            link=req.link,
+            cta=req.cta,
+            feedback=("EDITOR FEEDBACK on previous draft (address every point): " + crit["notes"]),
         )
         try:
             new_draft = _write_post_from_plan(client, revision_req, plan, top_posts_block)

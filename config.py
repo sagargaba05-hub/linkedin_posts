@@ -156,6 +156,7 @@ PROMPTS_DIR = os.path.join(PROJECT_ROOT, "prompts")
 
 def now_local():
     from datetime import datetime
+
     return datetime.now(ZoneInfo(TZ_NAME))
 
 

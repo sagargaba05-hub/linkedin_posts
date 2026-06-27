@@ -1,6 +1,5 @@
 """Tests for pure parsing logic — header normalization, critic output, URL extraction."""
 
-
 from generator import parse_critic_output
 from linkedin_api import extract_urn_from_post_url
 from sheets import _map_columns, _normalize_header

@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 import gspread
 from google.oauth2.service_account import Credentials
@@ -59,7 +59,7 @@ class SheetClient:
     @classmethod
     @with_circuit(sheets_breaker)
     @with_http_retries
-    def connect(cls, sheet_id: str, sa_json: str) -> "SheetClient":
+    def connect(cls, sheet_id: str, sa_json: str) -> SheetClient:
         creds_info = json.loads(sa_json)
         creds = Credentials.from_service_account_info(creds_info, scopes=SHEETS_SCOPES)
         gc = gspread.authorize(creds)
@@ -89,7 +89,7 @@ class SheetClient:
         max_idx = max(self.col_idx.values(), default=0)
         for row_number, raw in enumerate(all_rows[1:], start=2):
             raw = raw + [""] * (max_idx + 1 - len(raw))
-            status = (raw[status_col].strip().lower() if status_col is not None else "")
+            status = raw[status_col].strip().lower() if status_col is not None else ""
             if status in ("", "pending"):
                 out.append(self._row_to_dict(row_number, raw))
         LOG.info("Found %d pending rows", len(out))
@@ -108,8 +108,8 @@ class SheetClient:
         max_idx = max(self.col_idx.values(), default=0)
         for row_number, raw in enumerate(all_rows[1:], start=2):
             raw = raw + [""] * (max_idx + 1 - len(raw))
-            status = (raw[status_col].strip().lower() if status_col is not None else "")
-            post_url = (raw[post_url_col].strip() if post_url_col is not None else "")
+            status = raw[status_col].strip().lower() if status_col is not None else ""
+            post_url = raw[post_url_col].strip() if post_url_col is not None else ""
             if status == "posted" and post_url:
                 out.append(self._row_to_dict(row_number, raw))
         LOG.info("Found %d posted rows with URLs", len(out))

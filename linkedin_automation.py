@@ -51,8 +51,12 @@ LOG = get_logger("main")
 
 
 def main() -> int:
-    LOG.info("=== tick start at %s (env=%s, dry_run=%s) ===",
-             now_iso(), "STAGING" if is_staging() else "PRODUCTION", DRY_RUN)
+    LOG.info(
+        "=== tick start at %s (env=%s, dry_run=%s) ===",
+        now_iso(),
+        "STAGING" if is_staging() else "PRODUCTION",
+        DRY_RUN,
+    )
 
     # Master kill-switch — settable from the local control panel via vars.ENABLED.
     # When OFF the script exits immediately. We don't even load secrets.
@@ -94,8 +98,15 @@ def main() -> int:
     # --- Phase 2: process replies ---
     try:
         process_pending_drafts(
-            state, slack, anthropic_client, channel_id, bot_user_id,
-            linkedin_token, member_id, DRY_RUN, registry,
+            state,
+            slack,
+            anthropic_client,
+            channel_id,
+            bot_user_id,
+            linkedin_token,
+            member_id,
+            DRY_RUN,
+            registry,
         )
     except Exception as e:
         alert_exception(slack, channel_id, "process_pending_drafts", e)
@@ -103,7 +114,11 @@ def main() -> int:
     # --- Phase 3: maybe today's draft ---
     try:
         maybe_generate_daily_draft(
-            state, slack, anthropic_client, channel_id, registry,
+            state,
+            slack,
+            anthropic_client,
+            channel_id,
+            registry,
         )
     except Exception as e:
         alert_exception(slack, channel_id, "maybe_generate_daily_draft", e)

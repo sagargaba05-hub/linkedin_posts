@@ -5,8 +5,6 @@ All API calls go through retry + circuit-breaker decorators.
 
 from __future__ import annotations
 
-from typing import Optional
-
 from slack_sdk import WebClient
 
 from config import get_logger, is_staging
@@ -48,25 +46,36 @@ def post_draft(
         parts.append(f"_{critic_notes}_")
     parts.append("")
 
-    parts.extend([
-        "Reply *in this thread* with one of:",
-        "• `approve`",
-        "• `reject`",
-        "• `regenerate: <your feedback>`",
-        "",
-        ':bulb: To reply in-thread: hover the message → click the speech-bubble "Reply in thread" icon.',
-    ])
+    parts.extend(
+        [
+            "Reply *in this thread* with one of:",
+            "• `approve`",
+            "• `reject`",
+            "• `regenerate: <your feedback>`",
+            "",
+            ':bulb: To reply in-thread: hover the message → click the speech-bubble "Reply in thread" icon.',
+        ]
+    )
     text = "\n".join(parts)
     resp = client.chat_postMessage(channel=channel_id, text=text)
-    LOG.info("Posted draft for sno=%s thread_ts=%s critic=%s revisions=%d",
-             sno, resp["ts"], critic_verdict, revision_count)
+    LOG.info(
+        "Posted draft for sno=%s thread_ts=%s critic=%s revisions=%d",
+        sno,
+        resp["ts"],
+        critic_verdict,
+        revision_count,
+    )
     return resp["ts"]
 
 
 @with_circuit(slack_breaker)
 @with_http_retries
 def repost_in_thread(
-    client: WebClient, channel_id: str, thread_ts: str, sno: str, draft: str,
+    client: WebClient,
+    channel_id: str,
+    thread_ts: str,
+    sno: str,
+    draft: str,
 ) -> None:
     text = (
         f":arrows_counterclockwise: *{_staging_prefix()}Regenerated draft (SNo. {sno})*\n\n"
@@ -81,15 +90,20 @@ def repost_in_thread(
 @with_circuit(slack_breaker)
 @with_http_retries
 def get_latest_user_reply(
-    client: WebClient, channel_id: str, thread_ts: str, bot_user_id: str,
-) -> Optional[str]:
+    client: WebClient,
+    channel_id: str,
+    thread_ts: str,
+    bot_user_id: str,
+) -> str | None:
     """Return text of the latest non-bot reply in the thread, or None."""
     from slack_sdk.errors import SlackApiError
+
     try:
         resp = client.conversations_replies(channel=channel_id, ts=thread_ts, limit=50)
     except SlackApiError as e:
-        LOG.warning("conversations_replies failed for ts=%s: %s",
-                    thread_ts, e.response.get("error"))
+        LOG.warning(
+            "conversations_replies failed for ts=%s: %s", thread_ts, e.response.get("error")
+        )
         return None
 
     msgs = resp.get("messages", [])
@@ -97,7 +111,10 @@ def get_latest_user_reply(
     for i, m in enumerate(msgs):
         LOG.info(
             "  msg[%d] user=%s bot_id=%s subtype=%s text=%r",
-            i, m.get("user"), m.get("bot_id"), m.get("subtype"),
+            i,
+            m.get("user"),
+            m.get("bot_id"),
+            m.get("subtype"),
             (m.get("text") or "")[:60],
         )
 

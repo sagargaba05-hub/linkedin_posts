@@ -148,8 +148,7 @@ def fetch_post_stats(token: str, urn: str) -> dict:
         comments = (data.get("commentsSummary") or {}).get("aggregatedTotalComments", 0)
 
     reach_score = int(likes) + 2 * int(comments)
-    LOG.info("Stats for %s: likes=%s, comments=%s, score=%s",
-             urn, likes, comments, reach_score)
+    LOG.info("Stats for %s: likes=%s, comments=%s, score=%s", urn, likes, comments, reach_score)
     return {
         "likes": int(likes),
         "comments": int(comments),

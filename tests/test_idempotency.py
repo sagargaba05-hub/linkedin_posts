@@ -86,4 +86,4 @@ class TestRunOnce:
         second = run_once(reg, "k1", "op", expensive)
         assert first == "result"
         assert second is None  # Skipped due to idempotency
-        assert called == [1]   # Only called once
+        assert called == [1]  # Only called once

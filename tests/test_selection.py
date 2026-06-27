@@ -1,7 +1,5 @@
 """Tests for the pending-row picker in pipeline.py."""
 
-import pytest
-
 from pipeline import _effective_sno, _select_next_pending
 
 

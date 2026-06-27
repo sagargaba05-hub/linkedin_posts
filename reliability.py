@@ -41,8 +41,10 @@ from tenacity import (
 try:
     from gspread.exceptions import APIError as GSpreadAPIError
 except ImportError:  # pragma: no cover - keeps SDK-mocked unit tests importable
+
     class GSpreadAPIError(Exception):
         pass
+
 
 from config import (
     CIRCUIT_FAIL_MAX,
@@ -71,7 +73,9 @@ TRANSIENT_REQUESTS_EXCEPTIONS = (
 def _is_instance_of(exc: Exception, candidates: Any) -> bool:
     if not isinstance(candidates, tuple):
         candidates = (candidates,)
-    return any(isinstance(candidate, type) and isinstance(exc, candidate) for candidate in candidates)
+    return any(
+        isinstance(candidate, type) and isinstance(exc, candidate) for candidate in candidates
+    )
 
 
 def _status_code_from_response(response: Any) -> int | None:
@@ -170,7 +174,9 @@ sheets_breaker = pybreaker.CircuitBreaker(
 )
 
 
-def with_circuit(breaker: pybreaker.CircuitBreaker) -> Callable[[Callable[..., T]], Callable[..., T]]:
+def with_circuit(
+    breaker: pybreaker.CircuitBreaker,
+) -> Callable[[Callable[..., T]], Callable[..., T]]:
     """Decorator factory binding a function to a specific service's breaker."""
 
     def deco(fn: Callable[..., T]) -> Callable[..., T]:

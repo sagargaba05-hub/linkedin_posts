@@ -31,7 +31,6 @@ from config import (
     now_local,
     today_str,
 )
-from runtime_config import get_daily_draft_hour, is_today_enabled
 from engagement import (
     format_top_posts_for_prompt,
     load_top_performing_posts,
@@ -49,6 +48,7 @@ from observability import (
     record_token_first_seen,
 )
 from reliability import IdempotencyRegistry, new_idempotency_key
+from runtime_config import get_daily_draft_hour, is_today_enabled
 from sheets import SheetClient
 from slack_helpers import (
     get_latest_user_reply,
@@ -117,8 +117,9 @@ def _gc_abandoned_drafts(drafts: list[dict]) -> bool:
         except ValueError:
             continue
         if drafted_at < cutoff:
-            LOG.info("Auto-abandoning stale draft sno=%s (drafted %s)",
-                     d.get("sno"), drafted_at_str)
+            LOG.info(
+                "Auto-abandoning stale draft sno=%s (drafted %s)", d.get("sno"), drafted_at_str
+            )
             d["status"] = "abandoned"
             changed = True
     return changed
@@ -138,9 +139,14 @@ def process_pending_drafts(
     drafts: list[dict] = state.state_get("drafts", [])
     LOG.info("State holds %d total drafts", len(drafts))
     for i, d in enumerate(drafts):
-        LOG.info("  drafts[%d] sno=%s status=%s thread_ts=%s key=%s",
-                 i, d.get("sno"), d.get("status"), d.get("thread_ts"),
-                 d.get("idempotency_key", "(none)"))
+        LOG.info(
+            "  drafts[%d] sno=%s status=%s thread_ts=%s key=%s",
+            i,
+            d.get("sno"),
+            d.get("status"),
+            d.get("thread_ts"),
+            d.get("idempotency_key", "(none)"),
+        )
     if not drafts:
         return
 
@@ -167,21 +173,23 @@ def process_pending_drafts(
         LOG.info("Processing reply for SNo. %s: %r", d.get("sno"), reply_lc[:80])
 
         if reply_lc.startswith("approve"):
-            _handle_approve(d, state, slack, channel_id, thread_ts,
-                            linkedin_token, member_id, dry_run, registry)
+            _handle_approve(
+                d, state, slack, channel_id, thread_ts, linkedin_token, member_id, dry_run, registry
+            )
             changed = True
         elif reply_lc.startswith("reject"):
             _handle_reject(d, state, slack, channel_id, thread_ts, registry)
             changed = True
         elif reply_lc.startswith("regenerate"):
             feedback = reply.split(":", 1)[1].strip() if ":" in reply else ""
-            _handle_regenerate(d, state, slack, anthropic_client,
-                               channel_id, thread_ts, feedback)
+            _handle_regenerate(d, state, slack, anthropic_client, channel_id, thread_ts, feedback)
             changed = True
         else:
             if not d.get("nudged"):
                 post_followup(
-                    slack, channel_id, thread_ts,
+                    slack,
+                    channel_id,
+                    thread_ts,
                     "I didn't recognize that. Please reply with `approve`, "
                     "`reject`, or `regenerate: <feedback>`.",
                 )
@@ -193,9 +201,14 @@ def process_pending_drafts(
 
 
 def _handle_approve(
-    d: dict, state: SheetClient, slack: WebClient,
-    channel_id: str, thread_ts: str,
-    linkedin_token: str, member_id: str, dry_run: bool,
+    d: dict,
+    state: SheetClient,
+    slack: WebClient,
+    channel_id: str,
+    thread_ts: str,
+    linkedin_token: str,
+    member_id: str,
+    dry_run: bool,
     registry: IdempotencyRegistry,
 ) -> None:
     key = d["idempotency_key"]
@@ -205,7 +218,9 @@ def _handle_approve(
     if registry.has_completed(key, "linkedin_publish"):
         LOG.warning("Already published for key=%s — skipping duplicate POST", key)
         post_followup(
-            slack, channel_id, thread_ts,
+            slack,
+            channel_id,
+            thread_ts,
             ":information_source: This draft was already published to LinkedIn — skipping duplicate.",
         )
         d["status"] = "posted"
@@ -234,27 +249,38 @@ def _handle_approve(
             registry.mark_completed(key, "sheet_status_posted")
 
         post_followup(
-            slack, channel_id, thread_ts,
+            slack,
+            channel_id,
+            thread_ts,
             f":white_check_mark: Posted to LinkedIn: {post_url}",
         )
     except LinkedInTokenRejected:
         from observability import alert_token_rejected
+
         alert_token_rejected(slack, channel_id)
         post_followup(
-            slack, channel_id, thread_ts,
+            slack,
+            channel_id,
+            thread_ts,
             ":x: LinkedIn token expired. Will retry once you've rotated the token.",
         )
     except Exception as e:
         LOG.exception("LinkedIn publish failed for SNo. %s", d["sno"])
         post_followup(
-            slack, channel_id, thread_ts,
+            slack,
+            channel_id,
+            thread_ts,
             f":x: LinkedIn post failed: `{e}`. Will retry on next run.",
         )
 
 
 def _handle_reject(
-    d: dict, state: SheetClient, slack: WebClient,
-    channel_id: str, thread_ts: str, registry: IdempotencyRegistry,
+    d: dict,
+    state: SheetClient,
+    slack: WebClient,
+    channel_id: str,
+    thread_ts: str,
+    registry: IdempotencyRegistry,
 ) -> None:
     LOG.info("SNo. %s rejected", d["sno"])
     d["status"] = "rejected"
@@ -264,14 +290,21 @@ def _handle_reject(
         state.append_to_notes(d["row_number"], "Rejected via Slack — skipped.")
         registry.mark_completed(key, "sheet_status_rejected")
     post_followup(
-        slack, channel_id, thread_ts,
+        slack,
+        channel_id,
+        thread_ts,
         ":no_entry_sign: Marked as rejected. Skipping.",
     )
 
 
 def _handle_regenerate(
-    d: dict, state: SheetClient, slack: WebClient, anthropic_client: Anthropic,
-    channel_id: str, thread_ts: str, feedback: str,
+    d: dict,
+    state: SheetClient,
+    slack: WebClient,
+    anthropic_client: Anthropic,
+    channel_id: str,
+    thread_ts: str,
+    feedback: str,
 ) -> None:
     LOG.info("SNo. %s regenerate requested. Feedback=%r", d["sno"], feedback[:80])
     req = DraftRequest(
@@ -288,6 +321,7 @@ def _handle_regenerate(
         # Use the same top-posts context the original generation had
         top_block = d.get("top_posts_block", "")
         from generator import generate_post as _gen
+
         result = _gen(anthropic_client, req, top_posts_block=top_block)
         d["draft"] = result.draft
         history = d.get("regen_history", [])
@@ -298,7 +332,9 @@ def _handle_regenerate(
     except Exception as e:
         LOG.exception("Regeneration failed")
         post_followup(
-            slack, channel_id, thread_ts,
+            slack,
+            channel_id,
+            thread_ts,
             f":x: Regeneration failed: `{e}`. Try `regenerate: <new feedback>` again.",
         )
 
@@ -315,7 +351,8 @@ def _effective_sno(row: dict) -> str:
 
 
 def _select_next_pending(
-    pending_rows: list[dict], in_flight_snos: set,
+    pending_rows: list[dict],
+    in_flight_snos: set,
 ) -> dict | None:
     eligible = []
     for r in pending_rows:
@@ -334,10 +371,12 @@ def _select_next_pending(
 
     def date_key(r: dict) -> tuple:
         from datetime import date
+
         try:
             d = r["date"]
             if d:
                 from dateutil import parser as dateparser  # type: ignore
+
                 parsed = dateparser.parse(d, dayfirst=False).date()
                 return (0, parsed, r.get("row_number", 0))
         except Exception:
@@ -350,14 +389,22 @@ def _select_next_pending(
         LOG.warning("Pending-row sort failed (%s); falling back to sheet order", e)
 
     pick = eligible[0]
-    LOG.info("Selected sno=%s row=%s Date=%r from %d eligible pending rows",
-             pick["sno"], pick["row_number"], pick["date"], len(eligible))
+    LOG.info(
+        "Selected sno=%s row=%s Date=%r from %d eligible pending rows",
+        pick["sno"],
+        pick["row_number"],
+        pick["date"],
+        len(eligible),
+    )
     return pick
 
 
 def maybe_generate_daily_draft(
-    state: SheetClient, slack: WebClient, anthropic_client: Anthropic,
-    channel_id: str, registry: IdempotencyRegistry,
+    state: SheetClient,
+    slack: WebClient,
+    anthropic_client: Anthropic,
+    channel_id: str,
+    registry: IdempotencyRegistry,
 ) -> None:
     now = now_local()
     today = today_str()
@@ -372,8 +419,7 @@ def maybe_generate_daily_draft(
         LOG.info("Daily draft already generated for %s — skipping", today)
         return
     if now.hour < daily_hour:
-        LOG.info("Too early (hour=%d, threshold=%d) — skipping daily draft",
-                 now.hour, daily_hour)
+        LOG.info("Too early (hour=%d, threshold=%d) — skipping daily draft", now.hour, daily_hour)
         return
 
     # Idempotency: also guard the "I drafted today" flag with the registry,
@@ -398,11 +444,11 @@ def maybe_generate_daily_draft(
     pick = _select_next_pending(pending, in_flight)
 
     if pick:
-        _draft_from_row(pick, state, slack, anthropic_client, channel_id,
-                        drafts, now, top_block)
+        _draft_from_row(pick, state, slack, anthropic_client, channel_id, drafts, now, top_block)
     else:
-        _draft_from_fallback_theme(state, slack, anthropic_client, channel_id,
-                                   drafts, now, top_block)
+        _draft_from_fallback_theme(
+            state, slack, anthropic_client, channel_id, drafts, now, top_block
+        )
 
     state.state_set("drafts", drafts)
     state.state_set("last_drafted_date", today)
@@ -410,43 +456,58 @@ def maybe_generate_daily_draft(
 
 
 def _draft_from_row(
-    pick: dict, state: SheetClient, slack: WebClient, anthropic_client: Anthropic,
-    channel_id: str, drafts: list[dict], now, top_block: str,
+    pick: dict,
+    state: SheetClient,
+    slack: WebClient,
+    anthropic_client: Anthropic,
+    channel_id: str,
+    drafts: list[dict],
+    now,
+    top_block: str,
 ) -> None:
     LOG.info("Drafting from sheet row %d (SNo. %s)", pick["row_number"], pick["sno"])
     req = DraftRequest(
-        topic=pick["topic"], angle=pick["angle"], key_points=pick["key_points"],
-        voice=pick["voice"] or "thoughtful", hook_style=pick["hook_style"],
-        link=pick["link"], cta=pick["cta"],
+        topic=pick["topic"],
+        angle=pick["angle"],
+        key_points=pick["key_points"],
+        voice=pick["voice"] or "thoughtful",
+        hook_style=pick["hook_style"],
+        link=pick["link"],
+        cta=pick["cta"],
     )
     result = generate_post(anthropic_client, req, top_posts_block=top_block)
     thread_ts = post_draft(
-        slack, channel_id, pick["sno"], result.draft,
+        slack,
+        channel_id,
+        pick["sno"],
+        result.draft,
         critic_verdict=result.critic_verdict,
         critic_notes=result.critic_notes,
         revision_count=result.revision_count,
     )
 
-    drafts.append({
-        "sno": pick["sno"],
-        "row_number": pick["row_number"],
-        "thread_ts": thread_ts,
-        "idempotency_key": new_idempotency_key(),
-        "draft": result.draft,
-        "plan": result.plan,
-        "topic": pick["topic"],
-        "angle": pick["angle"],
-        "key_points": pick["key_points"],
-        "voice": pick["voice"],
-        "hook_style": pick["hook_style"],
-        "link": pick["link"],
-        "cta": pick["cta"],
-        "status": "drafted",
-        "drafted_at": now.isoformat(),
-        "is_auto": False,
-        "critic_verdict": result.critic_verdict,
-        "top_posts_block": top_block,
-    })
+    drafts.append(
+        {
+            "sno": pick["sno"],
+            "row_number": pick["row_number"],
+            "thread_ts": thread_ts,
+            "idempotency_key": new_idempotency_key(),
+            "draft": result.draft,
+            "plan": result.plan,
+            "topic": pick["topic"],
+            "angle": pick["angle"],
+            "key_points": pick["key_points"],
+            "voice": pick["voice"],
+            "hook_style": pick["hook_style"],
+            "link": pick["link"],
+            "cta": pick["cta"],
+            "status": "drafted",
+            "drafted_at": now.isoformat(),
+            "is_auto": False,
+            "critic_verdict": result.critic_verdict,
+            "top_posts_block": top_block,
+        }
+    )
 
     updates = {"status": "drafted"}
     if not pick.get("generated_by"):
@@ -460,8 +521,13 @@ def _draft_from_row(
 
 
 def _draft_from_fallback_theme(
-    state: SheetClient, slack: WebClient, anthropic_client: Anthropic,
-    channel_id: str, drafts: list[dict], now, top_block: str,
+    state: SheetClient,
+    slack: WebClient,
+    anthropic_client: Anthropic,
+    channel_id: str,
+    drafts: list[dict],
+    now,
+    top_block: str,
 ) -> None:
     LOG.info("No pending rows — using topics.md fallback")
     used_recently = state.state_get("recent_fallback_themes", [])
@@ -475,39 +541,47 @@ def _draft_from_fallback_theme(
     auto_sno = f"auto-{today_str()}"
     try:
         row_number = state.append_auto_row(
-            sno=auto_sno, topic=theme, voice="thoughtful", status="drafted",
+            sno=auto_sno,
+            topic=theme,
+            voice="thoughtful",
+            status="drafted",
         )
     except Exception:
         LOG.exception("Could not append auto row to queue")
         row_number = 0
 
     thread_ts = post_draft(
-        slack, channel_id, auto_sno, result.draft,
+        slack,
+        channel_id,
+        auto_sno,
+        result.draft,
         critic_verdict=result.critic_verdict,
         critic_notes=result.critic_notes,
         revision_count=result.revision_count,
     )
 
-    drafts.append({
-        "sno": auto_sno,
-        "row_number": row_number,
-        "thread_ts": thread_ts,
-        "idempotency_key": new_idempotency_key(),
-        "draft": result.draft,
-        "plan": result.plan,
-        "topic": theme,
-        "angle": "",
-        "key_points": "",
-        "voice": "thoughtful",
-        "hook_style": "",
-        "link": "",
-        "cta": "",
-        "status": "drafted",
-        "drafted_at": now.isoformat(),
-        "is_auto": True,
-        "critic_verdict": result.critic_verdict,
-        "top_posts_block": top_block,
-    })
+    drafts.append(
+        {
+            "sno": auto_sno,
+            "row_number": row_number,
+            "thread_ts": thread_ts,
+            "idempotency_key": new_idempotency_key(),
+            "draft": result.draft,
+            "plan": result.plan,
+            "topic": theme,
+            "angle": "",
+            "key_points": "",
+            "voice": "thoughtful",
+            "hook_style": "",
+            "link": "",
+            "cta": "",
+            "status": "drafted",
+            "drafted_at": now.isoformat(),
+            "is_auto": True,
+            "critic_verdict": result.critic_verdict,
+            "top_posts_block": top_block,
+        }
+    )
 
     if row_number:
         state.append_to_notes(
@@ -524,7 +598,10 @@ def _draft_from_fallback_theme(
 
 
 def check_token_expiry(
-    state: SheetClient, slack: WebClient, channel_id: str, member_id: str,
+    state: SheetClient,
+    slack: WebClient,
+    channel_id: str,
+    member_id: str,
 ) -> None:
     try:
         maybe_alert_token_expiry(slack, channel_id, state.state_get, state.state_set, member_id)
