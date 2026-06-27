@@ -19,6 +19,7 @@ Phase 1 runs every tick. Phase 2 runs every tick. Phase 3 runs at most once a da
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta
 
 from anthropic import Anthropic
@@ -58,6 +59,16 @@ from slack_helpers import (
 )
 
 LOG = get_logger("pipeline")
+
+DRAFTS_STATE_MAX_CHARS = 45_000
+DRAFTS_BULKY_FIELDS = {
+    "critic_notes",
+    "draft",
+    "plan",
+    "regen_history",
+    "top_posts_block",
+}
+DRAFTS_KEEP_FULL_STATUSES = {"drafted", "posted"}
 
 
 # --------------------------------------------------------------------------- #
@@ -103,9 +114,64 @@ def sync_engagement_metrics_phase(
 # --------------------------------------------------------------------------- #
 
 
-def _gc_abandoned_drafts(drafts: list[dict]) -> bool:
+def _serialized_drafts_len(drafts: list[dict]) -> int:
+    return len(json.dumps(drafts))
+
+
+def _compact_draft_for_state(draft: dict, keep_full_text: bool) -> dict:
+    compacted = dict(draft)
+    compacted.pop("top_posts_block", None)
+    if not keep_full_text:
+        removed_bulky_state = False
+        for key in DRAFTS_BULKY_FIELDS:
+            if key in compacted:
+                removed_bulky_state = True
+                compacted.pop(key)
+        if removed_bulky_state and not compacted.get("compacted_at"):
+            compacted["compacted_at"] = now_iso()
+    return compacted
+
+
+def compact_drafts_for_state(
+    drafts: list[dict], max_chars: int = DRAFTS_STATE_MAX_CHARS
+) -> list[dict]:
+    """Keep active/postable state useful while respecting Sheets' 50k cell cap."""
+    compacted = [
+        _compact_draft_for_state(d, d.get("status") in DRAFTS_KEEP_FULL_STATUSES) for d in drafts
+    ]
+    if _serialized_drafts_len(compacted) <= max_chars:
+        return compacted
+
+    # If posted history grows too large, preserve active Slack drafts first and
+    # compact older posted records until the state cell is safely writable.
+    for i, draft in enumerate(compacted):
+        if draft.get("status") == "posted":
+            compacted[i] = _compact_draft_for_state(draft, keep_full_text=False)
+            if _serialized_drafts_len(compacted) <= max_chars:
+                return compacted
+    return compacted
+
+
+def _save_drafts_state(state: SheetClient, drafts: list[dict]) -> None:
+    compacted = compact_drafts_for_state(drafts)
+    serialized_len = _serialized_drafts_len(compacted)
+    if serialized_len > DRAFTS_STATE_MAX_CHARS:
+        raise ValueError(
+            f"Compacted drafts state is still too large for Google Sheets "
+            f"({serialized_len} chars > {DRAFTS_STATE_MAX_CHARS})"
+        )
+    if compacted != drafts:
+        LOG.info(
+            "Compacted drafts state before save: %d -> %d chars",
+            _serialized_drafts_len(drafts),
+            serialized_len,
+        )
+    state.state_set("drafts", compacted)
+
+
+def _gc_abandoned_drafts(drafts: list[dict]) -> list[dict]:
     cutoff = now_local() - timedelta(hours=ABANDONED_DRAFT_HOURS)
-    changed = False
+    abandoned = []
     for d in drafts:
         if d.get("status") != "drafted":
             continue
@@ -121,8 +187,20 @@ def _gc_abandoned_drafts(drafts: list[dict]) -> bool:
                 "Auto-abandoning stale draft sno=%s (drafted %s)", d.get("sno"), drafted_at_str
             )
             d["status"] = "abandoned"
-            changed = True
-    return changed
+            abandoned.append(d)
+    return abandoned
+
+
+def _sync_abandoned_rows(state: SheetClient, abandoned_drafts: list[dict]) -> None:
+    for draft in abandoned_drafts:
+        row_number = draft.get("row_number")
+        if not row_number:
+            continue
+        try:
+            state.update_row(row_number, {"status": "abandoned"})
+            state.append_to_notes(row_number, "Auto-abandoned after stale Slack draft.")
+        except Exception:
+            LOG.exception("Failed to sync abandoned status for row=%s", row_number)
 
 
 def process_pending_drafts(
@@ -150,7 +228,10 @@ def process_pending_drafts(
     if not drafts:
         return
 
-    changed = _gc_abandoned_drafts(drafts)
+    abandoned_drafts = _gc_abandoned_drafts(drafts)
+    if abandoned_drafts:
+        _sync_abandoned_rows(state, abandoned_drafts)
+    changed = bool(abandoned_drafts)
 
     for d in drafts:
         if d.get("status") != "drafted":
@@ -197,7 +278,7 @@ def process_pending_drafts(
                 changed = True
 
     if changed:
-        state.state_set("drafts", drafts)
+        _save_drafts_state(state, drafts)
 
 
 def _handle_approve(
@@ -319,7 +400,8 @@ def _handle_regenerate(
     )
     try:
         # Use the same top-posts context the original generation had
-        top_block = d.get("top_posts_block", "")
+        top_posts = load_top_performing_posts(state, state.state_get)
+        top_block = format_top_posts_for_prompt(top_posts)
         from generator import generate_post as _gen
 
         result = _gen(anthropic_client, req, top_posts_block=top_block)
@@ -451,7 +533,7 @@ def maybe_generate_daily_draft(
             state, slack, anthropic_client, channel_id, drafts, now, top_block
         )
 
-    state.state_set("drafts", drafts)
+    _save_drafts_state(state, drafts)
     state.state_set("last_drafted_date", today)
     registry.mark_completed("daily", today_op)
 
@@ -506,7 +588,6 @@ def _draft_from_row(
             "drafted_at": now.isoformat(),
             "is_auto": False,
             "critic_verdict": result.critic_verdict,
-            "top_posts_block": top_block,
         }
     )
 
@@ -580,7 +661,6 @@ def _draft_from_fallback_theme(
             "drafted_at": now.isoformat(),
             "is_auto": True,
             "critic_verdict": result.critic_verdict,
-            "top_posts_block": top_block,
         }
     )
 
