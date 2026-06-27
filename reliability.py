@@ -21,8 +21,9 @@ from __future__ import annotations
 
 import functools
 import uuid
+from collections.abc import Callable
 from datetime import datetime, timedelta
-from typing import Any, Callable, TypeVar
+from typing import Any, TypeVar
 
 import pybreaker
 import requests
@@ -32,10 +33,16 @@ from slack_sdk.errors import SlackApiError
 from tenacity import (
     before_sleep_log,
     retry,
-    retry_if_exception_type,
+    retry_if_exception,
     stop_after_attempt,
     wait_exponential,
 )
+
+try:
+    from gspread.exceptions import APIError as GSpreadAPIError
+except ImportError:  # pragma: no cover - keeps SDK-mocked unit tests importable
+    class GSpreadAPIError(Exception):
+        pass
 
 from config import (
     CIRCUIT_FAIL_MAX,
@@ -61,18 +68,62 @@ TRANSIENT_REQUESTS_EXCEPTIONS = (
 )
 
 
-def _is_transient_http(exc: Exception) -> bool:
-    """For requests.HTTPError, only retry 5xx and 429. 4xx (except 429) is permanent."""
-    if isinstance(exc, requests.exceptions.HTTPError):
-        resp = getattr(exc, "response", None)
-        if resp is None:
+def _is_instance_of(exc: Exception, candidates: Any) -> bool:
+    if not isinstance(candidates, tuple):
+        candidates = (candidates,)
+    return any(isinstance(candidate, type) and isinstance(exc, candidate) for candidate in candidates)
+
+
+def _status_code_from_response(response: Any) -> int | None:
+    status_code = getattr(response, "status_code", None)
+    if status_code is None and isinstance(response, dict):
+        status_code = response.get("status_code") or response.get("code")
+    if status_code is None:
+        return None
+    try:
+        return int(status_code)
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_transient_api_error(exc: Exception) -> bool:
+    """Only retry rate limits and temporary server-side API failures."""
+    if _is_instance_of(exc, requests.exceptions.HTTPError):
+        status_code = _status_code_from_response(getattr(exc, "response", None))
+        if status_code is None:
             return True
-        return resp.status_code >= 500 or resp.status_code == 429
-    if isinstance(exc, SlackApiError):
+        return status_code >= 500 or status_code == 429
+    if _is_instance_of(exc, GSpreadAPIError):
+        status_code = getattr(exc, "code", None)
+        if status_code is None:
+            status_code = _status_code_from_response(getattr(exc, "response", None))
+        if status_code is None:
+            return True
+        return status_code >= 500 or status_code == 429
+    if _is_instance_of(exc, SlackApiError):
         # Slack returns errors in resp.data; treat rate-limited and ephemeral as retryable
         err = exc.response.get("error", "") if exc.response else ""
         return err in ("ratelimited", "service_unavailable", "fatal_error")
     return True
+
+
+def _should_retry(exc: BaseException) -> bool:
+    if not isinstance(exc, Exception):
+        return False
+    if _is_instance_of(exc, TRANSIENT_REQUESTS_EXCEPTIONS):
+        return True
+    if _is_instance_of(
+        exc,
+        (
+            requests.exceptions.HTTPError,
+            GSpreadAPIError,
+            SlackApiError,
+            AnthropicAPIError,
+            AnthropicTimeoutError,
+        ),
+    ):
+        return _is_transient_api_error(exc)
+    return False
 
 
 def with_http_retries(fn: Callable[..., T]) -> Callable[..., T]:
@@ -82,28 +133,13 @@ def with_http_retries(fn: Callable[..., T]) -> Callable[..., T]:
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception_type(
-            TRANSIENT_REQUESTS_EXCEPTIONS
-            + (
-                requests.exceptions.HTTPError,
-                SlackApiError,
-                AnthropicAPIError,
-                AnthropicTimeoutError,
-            )
-        ),
+        retry=retry_if_exception(_should_retry),
         before_sleep=before_sleep_log(LOG, "WARNING"),
         reraise=True,
     )
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
-        try:
-            return fn(*args, **kwargs)
-        except (requests.exceptions.HTTPError, SlackApiError) as e:
-            # Bail out without retry on permanent errors
-            if not _is_transient_http(e):
-                LOG.warning("Permanent error (no retry): %s", e)
-                raise
-            raise
+        return fn(*args, **kwargs)
 
     return wrapper
 
