@@ -104,7 +104,7 @@ def sync_engagement_metrics_phase(
         sync_engagement_metrics(state, linkedin_token)
     except LinkedInTokenRejected:
         alert_token_rejected(slack, channel_id)
-        raise
+        LOG.warning("LinkedIn token rejected during engagement sync; skipping sync this tick")
     except Exception:
         LOG.exception("sync_engagement_metrics failed (non-fatal)")
 
