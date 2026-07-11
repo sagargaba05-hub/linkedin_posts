@@ -18,6 +18,7 @@ import json
 import requests
 
 from config import (
+    LINKEDIN_ACCESS_TOKEN_URL,
     LINKEDIN_SOCIAL_ACTIONS,
     LINKEDIN_UGC_POSTS,
     LINKEDIN_USERINFO,
@@ -30,6 +31,10 @@ LOG = get_logger("linkedin")
 
 class LinkedInTokenRejected(Exception):
     """Raised on 401 from any LinkedIn endpoint. Caller should alert + stop."""
+
+
+class LinkedInTokenRefreshFailed(Exception):
+    """Raised when LinkedIn cannot refresh the access token."""
 
 
 # --------------------------------------------------------------------------- #
@@ -56,6 +61,36 @@ def get_member_id(token: str) -> str:
         raise RuntimeError(f"userinfo response missing 'sub': {data}")
     LOG.info("Member ID resolved to %s", sub)
     return sub
+
+
+@with_circuit(linkedin_breaker)
+@with_http_retries
+def refresh_access_token(
+    refresh_token: str,
+    client_id: str,
+    client_secret: str,
+) -> dict:
+    """Exchange a LinkedIn refresh token for a fresh access token."""
+    LOG.info("POST /oauth/v2/accessToken (grant_type=refresh_token)")
+    r = requests.post(
+        LINKEDIN_ACCESS_TOKEN_URL,
+        data={
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": client_id,
+            "client_secret": client_secret,
+        },
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        timeout=20,
+    )
+    if r.status_code >= 400:
+        raise LinkedInTokenRefreshFailed(
+            f"LinkedIn token refresh failed [{r.status_code}]: {r.text[:300]}"
+        )
+    data = r.json()
+    if not data.get("access_token"):
+        raise LinkedInTokenRefreshFailed("LinkedIn token refresh response missing access_token")
+    return data
 
 
 # --------------------------------------------------------------------------- #

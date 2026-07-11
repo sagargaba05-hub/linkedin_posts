@@ -42,7 +42,7 @@ from generator import (
     generate_post,
     pick_fallback_topic,
 )
-from linkedin_api import LinkedInTokenRejected, get_member_id, publish_post
+from linkedin_api import LinkedInTokenRejected, get_member_id, publish_post, refresh_access_token
 from observability import (
     alert_token_rejected,
     maybe_alert_token_expiry,
@@ -69,6 +69,8 @@ DRAFTS_BULKY_FIELDS = {
     "top_posts_block",
 }
 DRAFTS_KEEP_FULL_STATUSES = {"drafted", "posted"}
+LINKEDIN_TOKEN_CACHE_KEY = "linkedin_access_token_cache"
+LINKEDIN_TOKEN_REFRESH_BUFFER_MINUTES = 60
 
 
 # --------------------------------------------------------------------------- #
@@ -76,9 +78,66 @@ DRAFTS_KEEP_FULL_STATUSES = {"drafted", "posted"}
 # --------------------------------------------------------------------------- #
 
 
-def ensure_member_id(state: SheetClient, token: str) -> str:
+def linkedin_refresh_configured(secrets: dict[str, str]) -> bool:
+    return all(
+        secrets.get(name)
+        for name in ("LINKEDIN_REFRESH_TOKEN", "LINKEDIN_CLIENT_ID", "LINKEDIN_CLIENT_SECRET")
+    )
+
+
+def _cached_linkedin_token_is_valid(cache: dict) -> bool:
+    try:
+        expires_at = datetime.fromisoformat(cache["expires_at"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return expires_at > now_local() + timedelta(minutes=LINKEDIN_TOKEN_REFRESH_BUFFER_MINUTES)
+
+
+def clear_linkedin_token_cache(state: SheetClient) -> None:
+    state.state_set(LINKEDIN_TOKEN_CACHE_KEY, {})
+
+
+def resolve_linkedin_token(
+    state: SheetClient, secrets: dict[str, str], force_refresh: bool = False
+) -> str:
+    """Return a usable LinkedIn access token, refreshing it when configured."""
+    if not linkedin_refresh_configured(secrets):
+        return secrets["LINKEDIN_TOKEN"]
+
+    cache = state.state_get(LINKEDIN_TOKEN_CACHE_KEY, {}) or {}
+    if (
+        not force_refresh
+        and isinstance(cache, dict)
+        and cache.get("access_token")
+        and _cached_linkedin_token_is_valid(cache)
+    ):
+        LOG.info("Using cached refreshed LinkedIn access token")
+        return cache["access_token"]
+
+    refreshed = refresh_access_token(
+        secrets["LINKEDIN_REFRESH_TOKEN"],
+        secrets["LINKEDIN_CLIENT_ID"],
+        secrets["LINKEDIN_CLIENT_SECRET"],
+    )
+    expires_in = int(refreshed.get("expires_in") or 0)
+    expires_at = now_local() + timedelta(seconds=expires_in)
+    state.state_set(
+        LINKEDIN_TOKEN_CACHE_KEY,
+        {
+            "access_token": refreshed["access_token"],
+            "expires_at": expires_at.isoformat(timespec="seconds"),
+            "refreshed_at": now_local().isoformat(timespec="seconds"),
+            "scope": refreshed.get("scope", ""),
+            "refresh_token_expires_in": refreshed.get("refresh_token_expires_in"),
+        },
+    )
+    LOG.info("Refreshed LinkedIn access token; expires_at=%s", expires_at.isoformat())
+    return refreshed["access_token"]
+
+
+def ensure_member_id(state: SheetClient, token: str, validate_token: bool = False) -> str:
     cached = state.state_get("linkedin_member_id")
-    if cached:
+    if cached and not validate_token:
         LOG.info("Using cached LinkedIn member_id from state")
         record_token_first_seen(state.state_get, state.state_set, cached)
         return cached

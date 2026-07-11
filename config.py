@@ -61,6 +61,9 @@ def env_required_all() -> dict[str, str]:
         "SLACK_BOT_TOKEN": env("SLACK_BOT_TOKEN", required=True),
         "SLACK_CHANNEL_ID": env("SLACK_CHANNEL_ID", required=True),
         "LINKEDIN_TOKEN": env("LINKEDIN_TOKEN", required=True),
+        "LINKEDIN_REFRESH_TOKEN": env("LINKEDIN_REFRESH_TOKEN"),
+        "LINKEDIN_CLIENT_ID": env("LINKEDIN_CLIENT_ID"),
+        "LINKEDIN_CLIENT_SECRET": env("LINKEDIN_CLIENT_SECRET"),
     }
 
 
@@ -126,6 +129,7 @@ LINKEDIN_API_BASE = "https://api.linkedin.com"
 LINKEDIN_USERINFO = f"{LINKEDIN_API_BASE}/v2/userinfo"
 LINKEDIN_UGC_POSTS = f"{LINKEDIN_API_BASE}/v2/ugcPosts"
 LINKEDIN_SOCIAL_ACTIONS = f"{LINKEDIN_API_BASE}/v2/socialActions"
+LINKEDIN_ACCESS_TOKEN_URL = "https://www.linkedin.com/oauth/v2/accessToken"
 
 CANONICAL_COLUMNS: dict[str, list[str]] = {
     "sno": ["sno", "sno.", "s.no", "serial", "#"],

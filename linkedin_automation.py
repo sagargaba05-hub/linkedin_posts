@@ -34,12 +34,16 @@ from anthropic import Anthropic
 from slack_sdk import WebClient
 
 from config import DRY_RUN, env_required_all, get_logger, is_staging, now_iso
+from linkedin_api import LinkedInTokenRefreshFailed, LinkedInTokenRejected
 from observability import alert_exception
 from pipeline import (
     check_token_expiry,
+    clear_linkedin_token_cache,
     ensure_member_id,
+    linkedin_refresh_configured,
     maybe_generate_daily_draft,
     process_pending_drafts,
+    resolve_linkedin_token,
     sync_engagement_metrics_phase,
 )
 from reliability import IdempotencyRegistry
@@ -71,19 +75,29 @@ def main() -> int:
     slack = WebClient(token=secrets["SLACK_BOT_TOKEN"])
     anthropic_client = Anthropic(api_key=secrets["ANTHROPIC_API_KEY"])
     channel_id = secrets["SLACK_CHANNEL_ID"]
-    linkedin_token = secrets["LINKEDIN_TOKEN"]
-
     # Idempotency registry on top of the _state tab
     registry = IdempotencyRegistry(state.state_get, state.state_set)
     registry.gc_old_keys(days=30)
 
     bot_user_id = get_bot_user_id(slack)
 
-    # Resolve member ID and run token-expiry check. If the token is rejected
-    # here we alert and exit early so downstream phases don't hammer LinkedIn.
+    # Resolve member ID and run token-expiry check. If refresh-token support is
+    # configured, validate cached access tokens and refresh once on rejection.
     try:
-        member_id = ensure_member_id(state, linkedin_token)
+        refresh_configured = linkedin_refresh_configured(secrets)
+        linkedin_token = resolve_linkedin_token(state, secrets)
+        try:
+            member_id = ensure_member_id(state, linkedin_token, validate_token=refresh_configured)
+        except LinkedInTokenRejected:
+            if not refresh_configured:
+                raise
+            clear_linkedin_token_cache(state)
+            linkedin_token = resolve_linkedin_token(state, secrets, force_refresh=True)
+            member_id = ensure_member_id(state, linkedin_token, validate_token=True)
         check_token_expiry(state, slack, channel_id, member_id)
+    except LinkedInTokenRefreshFailed as e:
+        alert_exception(slack, channel_id, "resolve_linkedin_token", e)
+        return 0
     except Exception as e:
         alert_exception(slack, channel_id, "ensure_member_id", e)
         raise

@@ -55,7 +55,7 @@ Repo → Actions → linkedin-automation (production) → "Run workflow" → pic
 
 ### Slack alerts you got "LinkedIn token rejected (401)"
 
-The 60-day token expired. Regenerate following [secret_rotation.md](secret_rotation.md). Update the `LINKEDIN_TOKEN` secret. Next tick resumes; engagement sync and posting both work again.
+The access token expired or was revoked. If `LINKEDIN_REFRESH_TOKEN`, `LINKEDIN_CLIENT_ID`, and `LINKEDIN_CLIENT_SECRET` are configured, the workflow refreshes access tokens automatically and caches them in `_state`. If refresh is not configured, or the refresh token itself expires/revokes, regenerate tokens following [secret_rotation.md](secret_rotation.md). Next tick resumes; engagement sync and posting both work again.
 
 ### Slack alerts you with a Python traceback
 

@@ -2,7 +2,20 @@
 
 When (not if) you need to rotate a credential, follow the relevant section. Always rotate by **adding the new secret first**, then **revoking the old one** — the opposite order causes downtime.
 
-## LinkedIn access token (every 60 days, or on suspected compromise)
+## LinkedIn tokens
+
+Preferred setup: use a LinkedIn refresh token so the workflow can renew access tokens automatically.
+
+Automatic refresh requires these GitHub Actions secrets:
+
+- `LINKEDIN_TOKEN`: initial access token fallback
+- `LINKEDIN_REFRESH_TOKEN`: refresh token from LinkedIn's OAuth authorization-code flow
+- `LINKEDIN_CLIENT_ID`: app Client ID from the LinkedIn Developer Portal Auth tab
+- `LINKEDIN_CLIENT_SECRET`: app Client Secret from the LinkedIn Developer Portal Auth tab
+
+Access tokens last about 60 days. Refresh tokens last longer, but still expire or can be revoked, so you may need to re-authorize roughly yearly or after a 401 refresh failure.
+
+### Manual access-token fallback
 
 The script will Slack-alert you 5 days before expiry, and immediately on a 401. Either trigger means: rotate now.
 
@@ -94,6 +107,14 @@ For all six secrets, the recovery playbook is the same:
 | `SLACK_BOT_TOKEN` | ✓ | (shared) | `xoxb-...` |
 | `ANTHROPIC_API_KEY` | ✓ | (shared) | `sk-ant-...` |
 | `LINKEDIN_TOKEN` | ✓ | (shared) | Long token starting `AQ...` |
+
+Optional LinkedIn auto-refresh secrets:
+
+| Secret | Production | Staging | What it looks like |
+|---|---|---|---|
+| `LINKEDIN_REFRESH_TOKEN` | optional | (shared) | Long token starting `AQ...` |
+| `LINKEDIN_CLIENT_ID` | optional | (shared) | LinkedIn app Client ID |
+| `LINKEDIN_CLIENT_SECRET` | optional | (shared) | LinkedIn app Client Secret |
 
 For staging: create a separate sheet with the same column structure, share it with the same service account, and create a separate Slack channel (`#linkedin-drafts-staging`). Invite the bot to both.
 
